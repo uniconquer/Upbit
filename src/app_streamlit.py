@@ -63,26 +63,24 @@ def _collect_code_fingerprint():
     except Exception:
         return 'na'
 
-if 'run_counter' not in st.session_state:
-    # 새 프로세스 시작 구간 (session_state 초기화) → startup 라인
+if '_PROC_LOGGED' not in globals():
+    globals()['_PROC_LOGGED'] = True
     fp = _collect_code_fingerprint()
-    _safe_append_log(f"START {datetime.utcnow().isoformat()}Z pid={os.getpid()} fp={fp}")
+    _safe_append_log(f"PROC_START {datetime.utcnow().isoformat()}Z pid={os.getpid()} fp={fp}")
+
+if 'run_counter' not in st.session_state:
     st.session_state['run_counter'] = 0
+    st.session_state['session_id'] = hashlib.sha1(os.urandom(8)).hexdigest()[:8]
+    _safe_append_log(f"SESSION_START {datetime.utcnow().isoformat()}Z pid={os.getpid()} sid={st.session_state['session_id']}")
 else:
-    # 일반 rerun → rerun 로그는 과도해질 수 있어 주기적(10회마다) 기록
-    if st.session_state['run_counter'] % 10 == 0:
-        _safe_append_log(f"RERUN {datetime.utcnow().isoformat()}Z pid={os.getpid()} rc={st.session_state['run_counter']}")
+    if st.session_state['run_counter'] % 15 == 0:
+        _safe_append_log(f"RERUN {datetime.utcnow().isoformat()}Z pid={os.getpid()} rc={st.session_state['run_counter']} sid={st.session_state.get('session_id')}")
 st.session_state['run_counter'] += 1
 
 def _format_uptime():
     sec = int(time.time() - PROCESS_START_TS)
     h = sec // 3600; m = (sec % 3600)//60; s = sec % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
-
-# 런 카운터 (자동/비정상 재시작 진단용)
-if 'run_counter' not in st.session_state:
-    st.session_state['run_counter'] = 0
-st.session_state['run_counter'] += 1
 
 
 @st.cache_data(ttl=30)
