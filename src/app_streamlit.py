@@ -1,6 +1,8 @@
 import os
 import json
 from pathlib import Path
+import hashlib
+import threading
 from datetime import datetime, timedelta
 import streamlit as st
 from dotenv import load_dotenv
@@ -21,6 +23,54 @@ except Exception:  # pragma: no cover - 호환성 처리
 load_dotenv()
 
 st.set_page_config(page_title="Upbit Markets", layout="wide")
+
+# ---------------- 프로세스/재시작 진단 ----------------
+PROCESS_START_TS = getattr(__builtins__, 'UPBIT_APP_START_TS', None)
+if PROCESS_START_TS is None:
+    PROCESS_START_TS = time.time()
+    __builtins__.UPBIT_APP_START_TS = PROCESS_START_TS  # 전역 보관 (재런 유지)
+
+import tempfile
+DIAG_DIR = Path(tempfile.gettempdir()) / 'upbit_live_state'
+DIAG_DIR.mkdir(exist_ok=True)
+RUN_LOG_FILE = DIAG_DIR / 'run_log.txt'
+
+def _safe_append_log(line: str):
+    try:
+        with RUN_LOG_FILE.open('a', encoding='utf-8') as f:
+            f.write(line + '\n')
+    except Exception:
+        pass
+
+def _collect_code_fingerprint():
+    try:
+        root = Path(__file__).parent
+        mtimes = []
+        for p in root.glob('*.py'):
+            try:
+                mtimes.append(str(int(p.stat().st_mtime)))
+            except Exception:
+                pass
+        h = hashlib.sha1((';'.join(sorted(mtimes))).encode()).hexdigest()[:10]
+        return h
+    except Exception:
+        return 'na'
+
+if 'run_counter' not in st.session_state:
+    # 새 프로세스 시작 구간 (session_state 초기화) → startup 라인
+    fp = _collect_code_fingerprint()
+    _safe_append_log(f"START {datetime.utcnow().isoformat()}Z pid={os.getpid()} fp={fp}")
+    st.session_state['run_counter'] = 0
+else:
+    # 일반 rerun → rerun 로그는 과도해질 수 있어 주기적(10회마다) 기록
+    if st.session_state['run_counter'] % 10 == 0:
+        _safe_append_log(f"RERUN {datetime.utcnow().isoformat()}Z pid={os.getpid()} rc={st.session_state['run_counter']}")
+st.session_state['run_counter'] += 1
+
+def _format_uptime():
+    sec = int(time.time() - PROCESS_START_TS)
+    h = sec // 3600; m = (sec % 3600)//60; s = sec % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 # 런 카운터 (자동/비정상 재시작 진단용)
 if 'run_counter' not in st.session_state:
@@ -119,7 +169,21 @@ with st.sidebar:
     elif btn_lv:
         st.session_state['active_view'] = 'live'
     st.caption('세로 버튼: 클릭 시 즉시 전환 / 자동 새로고침 유지')
-    st.caption(f"Run #{st.session_state['run_counter']} (PID {os.getpid()})")
+    st.caption(f"Run #{st.session_state['run_counter']} (PID {os.getpid()}) Uptime {_format_uptime()}")
+    # 디버그 패널 토글
+    dbg_exp = st.expander('디버그 / 재시작 추적', expanded=False)
+    with dbg_exp:
+        st.write('run_log 최근 30줄:')
+        try:
+            if RUN_LOG_FILE.exists():
+                lines = RUN_LOG_FILE.read_text(encoding='utf-8').splitlines()[-30:]
+                for ln in lines:
+                    st.text(ln)
+            else:
+                st.text('로그 없음')
+        except Exception:
+            st.text('로그 읽기 오류')
+        st.caption('START 줄이 새 PID 와 함께 나타나면 실제 프로세스 재시작. RERUN 은 같은 프로세스 내 재실행.')
 
 # 라이브 모니터 동작 중이면 뷰 고정
 if 'live_monitor' in st.session_state and st.session_state['live_monitor'] is not None and st.session_state.get('active_view') != 'live':
@@ -599,8 +663,7 @@ elif view == 'live':
     st.title('라이브 자동 매매 (Mean Reversion)')
     # ---------------- 영속 상태 저장/복구 유틸 ----------------
     # Streamlit 파일 감시 재실행을 피하기 위해 temp 디렉토리 사용 (프로세스 재시작에도 유지 가능)
-    import tempfile
-    STATE_DIR = Path(tempfile.gettempdir()) / 'upbit_live_state'
+    STATE_DIR = DIAG_DIR  # 동일 temp 경로 재사용
     STATE_FILE = STATE_DIR / 'live_state.json'
 
     def _serialize_live_state():
