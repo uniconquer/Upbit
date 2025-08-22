@@ -21,6 +21,10 @@ except Exception:  # pragma: no cover - 호환성 처리
 
 load_dotenv()
 
+# 글로벌 라이브 모니터 저장소 (세션 재생성 시 복구)
+if '_GLOBAL_MONITOR' not in globals():
+    _GLOBAL_MONITOR = {'monitor': None, 'config': None, 'markets': None}
+
 st.set_page_config(page_title="Upbit Markets", layout="wide")
 
 # ---------------- 프로세스/재시작 진단 ----------------
@@ -157,6 +161,18 @@ def _set_query_params(**kwargs):
 if 'active_view' not in st.session_state:
     qp = _get_query_params()
     st.session_state['active_view'] = qp.get('view', ['markets'])[0] if isinstance(qp.get('view'), list) else qp.get('view', 'markets')
+    # 세션 새로 생성된 상황: 글로벌 모니터 있으면 바로 라이브로 전환 및 붙이기
+    try:
+        if '_GLOBAL_MONITOR' in globals() and _GLOBAL_MONITOR.get('monitor') is not None:
+            st.session_state['live_monitor'] = _GLOBAL_MONITOR['monitor']
+            if _GLOBAL_MONITOR.get('config'):
+                st.session_state['live_saved_config'] = _GLOBAL_MONITOR['config']
+            if _GLOBAL_MONITOR.get('markets'):
+                st.session_state['live_markets'] = _GLOBAL_MONITOR['markets']
+            st.session_state['active_view'] = 'live'
+            st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': '(세션 복구) 라이브 자동 재부착'})
+    except Exception:
+        pass
 
 with st.sidebar:
     st.markdown("**메뉴**")
