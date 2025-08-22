@@ -73,18 +73,46 @@ def load_candles_cached(market: str, interval: str, count: int):
         return []
     return [c.model_dump() for c in cds]
 
+def _get_query_params():
+    # Streamlit 버전에 따른 호환 처리
+    try:
+        if hasattr(st, 'query_params'):
+            return dict(st.query_params)
+        return st.experimental_get_query_params()
+    except Exception:
+        return {}
+
+def _set_query_params(**kwargs):
+    try:
+        if hasattr(st, 'query_params'):
+            st.query_params.update(kwargs)
+        else:
+            st.experimental_set_query_params(**kwargs)
+    except Exception:
+        pass
+
+# 초기 뷰 결정: session_state -> URL -> 기본값
+if 'active_view' not in st.session_state:
+    qp = _get_query_params()
+    st.session_state['active_view'] = qp.get('view', ['markets'])[0] if isinstance(qp.get('view'), list) else qp.get('view', 'markets')
+
 with st.sidebar:
-    if 'active_view' not in st.session_state:
-        st.session_state['active_view'] = 'markets'
     view = st.radio(
         "메뉴",
         ("markets", "account", "backtest", "live"),
+        index=["markets","account","backtest","live"].index(st.session_state['active_view']) if st.session_state.get('active_view') in ["markets","account","backtest","live"] else 0,
         format_func=lambda x: {"markets":"마켓 불러오기","account":"내 정보 보기","backtest":"백테스트","live":"라이브"}[x],
         key='active_view'
     )
-    st.caption("자동 새로고침 시에도 현재 선택이 유지됩니다.")
+    st.caption("세션 재시작 / 자동 새로고침에도 뷰 유지 (URL 동기화)")
 
+# 라이브 모니터 동작 중이면 다른 메뉴 클릭을 방지하고 고정 (원치 않으면 아래 조건 제거)
+if 'live_monitor' in st.session_state and st.session_state.get('active_view') != 'live':
+    st.session_state['active_view'] = 'live'
 view = st.session_state.get('active_view', 'markets')
+
+# URL query params 동기화 (반복 호출 시에도 동일 값이면 큰 영향 없음)
+_set_query_params(view=view)
 
 if view == 'markets':
     st.title('KRW 마켓 상위 거래대금')
