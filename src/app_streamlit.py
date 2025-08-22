@@ -97,21 +97,30 @@ if 'active_view' not in st.session_state:
     st.session_state['active_view'] = qp.get('view', ['markets'])[0] if isinstance(qp.get('view'), list) else qp.get('view', 'markets')
 
 with st.sidebar:
-    view = st.radio(
+    # 라디오 위젯은 별도 key 사용하여 위젯 상태와 논리 상태 분리
+    current = st.session_state.get('active_view', 'markets')
+    radio_choice = st.radio(
         "메뉴",
         ("markets", "account", "backtest", "live"),
-        index=["markets","account","backtest","live"].index(st.session_state['active_view']) if st.session_state.get('active_view') in ["markets","account","backtest","live"] else 0,
+        index=["markets","account","backtest","live"].index(current) if current in ["markets","account","backtest","live"] else 0,
         format_func=lambda x: {"markets":"마켓 불러오기","account":"내 정보 보기","backtest":"백테스트","live":"라이브"}[x],
-        key='active_view'
+        key='nav_choice'
     )
     st.caption("세션 재시작 / 자동 새로고침에도 뷰 유지 (URL 동기화)")
 
-# 라이브 모니터 동작 중이면 다른 메뉴 클릭을 방지하고 고정 (원치 않으면 아래 조건 제거)
-if 'live_monitor' in st.session_state and st.session_state.get('active_view') != 'live':
-    st.session_state['active_view'] = 'live'
+# 라이브 모니터 동작 중이면 뷰 고정 (위젯 선택 무시) / 아니면 라디오 선택 반영
+if 'live_monitor' in st.session_state and st.session_state['live_monitor'] is not None:
+    if st.session_state.get('active_view') != 'live':
+        st.session_state['active_view'] = 'live'
+        st.toast('라이브 실행 중: 뷰를 라이브로 고정합니다.', icon='⚙️')
+else:
+    # 사용자가 선택한 라디오 메뉴 적용
+    if st.session_state.get('active_view') != radio_choice:
+        st.session_state['active_view'] = radio_choice
+
 view = st.session_state.get('active_view', 'markets')
 
-# URL query params 동기화 (반복 호출 시에도 동일 값이면 큰 영향 없음)
+# URL query params 동기화
 _set_query_params(view=view)
 
 if view == 'markets':
