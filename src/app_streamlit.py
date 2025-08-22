@@ -97,26 +97,24 @@ if 'active_view' not in st.session_state:
     st.session_state['active_view'] = qp.get('view', ['markets'])[0] if isinstance(qp.get('view'), list) else qp.get('view', 'markets')
 
 with st.sidebar:
-    # 라디오 위젯은 별도 key 사용하여 위젯 상태와 논리 상태 분리
-    current = st.session_state.get('active_view', 'markets')
-    radio_choice = st.radio(
-        "메뉴",
-        ("markets", "account", "backtest", "live"),
-        index=["markets","account","backtest","live"].index(current) if current in ["markets","account","backtest","live"] else 0,
-        format_func=lambda x: {"markets":"마켓 불러오기","account":"내 정보 보기","backtest":"백테스트","live":"라이브"}[x],
-        key='nav_choice'
-    )
-    st.caption("세션 재시작 / 자동 새로고침에도 뷰 유지 (URL 동기화)")
+    st.markdown("**메뉴**")
+    col_nav1, col_nav2 = st.columns(2)
+    with col_nav1:
+        btn_mk = st.button('마켓 불러오기', key='_nav_markets')
+        btn_bt = st.button('백테스트', key='_nav_backtest')
+    with col_nav2:
+        btn_ac = st.button('내 정보 보기', key='_nav_account')
+        btn_lv = st.button('라이브', key='_nav_live')
+    # 클릭 처리 (순서 중요: 동시에 여러 True 될 가능성 낮지만 방지 위해 if/elif)
+    if btn_mk: st.session_state['active_view'] = 'markets'
+    elif btn_ac: st.session_state['active_view'] = 'account'
+    elif btn_bt: st.session_state['active_view'] = 'backtest'
+    elif btn_lv: st.session_state['active_view'] = 'live'
+    st.caption('버튼 전환: 클릭 시 뷰 변경, 자동 새로고침에서도 유지')
 
-# 라이브 모니터 동작 중이면 뷰 고정 (위젯 선택 무시) / 아니면 라디오 선택 반영
-if 'live_monitor' in st.session_state and st.session_state['live_monitor'] is not None:
-    if st.session_state.get('active_view') != 'live':
-        st.session_state['active_view'] = 'live'
-        st.toast('라이브 실행 중: 뷰를 라이브로 고정합니다.', icon='⚙️')
-else:
-    # 사용자가 선택한 라디오 메뉴 적용
-    if st.session_state.get('active_view') != radio_choice:
-        st.session_state['active_view'] = radio_choice
+# 라이브 모니터 동작 중이면 뷰 고정
+if 'live_monitor' in st.session_state and st.session_state['live_monitor'] is not None and st.session_state.get('active_view') != 'live':
+    st.session_state['active_view'] = 'live'
 
 view = st.session_state.get('active_view', 'markets')
 
