@@ -74,23 +74,17 @@ def load_candles_cached(market: str, interval: str, count: int):
     return [c.model_dump() for c in cds]
 
 with st.sidebar:
-    load_btn = st.button("마켓 불러오기", width=200)
-    acct_btn = st.button("내 정보 보기", width=200)
-    backtest_btn = st.button("백테스트", width=200)
-    live_btn = st.button("라이브", width=200)
+    if 'active_view' not in st.session_state:
+        st.session_state['active_view'] = 'markets'
+    view = st.radio(
+        "메뉴",
+        ("markets", "account", "backtest", "live"),
+        format_func=lambda x: {"markets":"마켓 불러오기","account":"내 정보 보기","backtest":"백테스트","live":"라이브"}[x],
+        key='active_view'
+    )
+    st.caption("자동 새로고침 시에도 현재 선택이 유지됩니다.")
 
-if 'active_view' not in st.session_state:
-    st.session_state['active_view'] = 'markets'
-if load_btn:
-    st.session_state['active_view'] = 'markets'
-elif acct_btn:
-    st.session_state['active_view'] = 'account'
-elif backtest_btn:
-    st.session_state['active_view'] = 'backtest'
-elif live_btn:
-    st.session_state['active_view'] = 'live'
-
-view = st.session_state['active_view']
+view = st.session_state.get('active_view', 'markets')
 
 if view == 'markets':
     st.title('KRW 마켓 상위 거래대금')
