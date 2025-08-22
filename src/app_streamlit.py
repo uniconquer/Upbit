@@ -98,19 +98,20 @@ if 'active_view' not in st.session_state:
 
 with st.sidebar:
     st.markdown("**메뉴**")
-    col_nav1, col_nav2 = st.columns(2)
-    with col_nav1:
-        btn_mk = st.button('마켓 불러오기', key='_nav_markets')
-        btn_bt = st.button('백테스트', key='_nav_backtest')
-    with col_nav2:
-        btn_ac = st.button('내 정보 보기', key='_nav_account')
-        btn_lv = st.button('라이브', key='_nav_live')
-    # 클릭 처리 (순서 중요: 동시에 여러 True 될 가능성 낮지만 방지 위해 if/elif)
-    if btn_mk: st.session_state['active_view'] = 'markets'
-    elif btn_ac: st.session_state['active_view'] = 'account'
-    elif btn_bt: st.session_state['active_view'] = 'backtest'
-    elif btn_lv: st.session_state['active_view'] = 'live'
-    st.caption('버튼 전환: 클릭 시 뷰 변경, 자동 새로고침에서도 유지')
+    btn_mk = st.button('📊 마켓 불러오기', key='_nav_markets', use_container_width=True)
+    btn_ac = st.button('💰 내 정보 보기', key='_nav_account', use_container_width=True)
+    btn_bt = st.button('🧪 백테스트', key='_nav_backtest', use_container_width=True)
+    btn_lv = st.button('⚡ 라이브', key='_nav_live', use_container_width=True)
+    # 클릭 처리 (위에서 아래 순)
+    if btn_mk:
+        st.session_state['active_view'] = 'markets'
+    elif btn_ac:
+        st.session_state['active_view'] = 'account'
+    elif btn_bt:
+        st.session_state['active_view'] = 'backtest'
+    elif btn_lv:
+        st.session_state['active_view'] = 'live'
+    st.caption('세로 버튼: 클릭 시 즉시 전환 / 자동 새로고침 유지')
 
 # 라이브 모니터 동작 중이면 뷰 고정
 if 'live_monitor' in st.session_state and st.session_state['live_monitor'] is not None and st.session_state.get('active_view') != 'live':
