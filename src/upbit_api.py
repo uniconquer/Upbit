@@ -56,7 +56,7 @@ class UpbitAPI:
             out.extend(r.json())
         return out
 
-    def candles(self, market: str, interval: str = "day", count: int = 200) -> list[Candle]:
+    def candles(self, market: str, interval: str = "day", count: int = 200, to: Optional[str] = None) -> list[Candle]:
         # interval: minute1|minute3|minute5|minute10|minute15|minute30|minute60|minute240|day|week|month
         endpoint = {
             "day": "candles/days",
@@ -68,7 +68,11 @@ class UpbitAPI:
             endpoint = f"candles/minutes/{unit}"
         if endpoint is None:
             raise ValueError("invalid interval")
-        r = self.session.get(f"{UPBIT_API_BASE}/{endpoint}", params={"market": market, "count": count}, timeout=10)
+        params = {"market": market, "count": count}
+        # Upbit 'to' 파라미터: 마지막 캔들 기준 시간 문자열 (UTC 기준 문서 명시, 실무상 KST 문자열도 허용되는 사례 있음)
+        if to:
+            params["to"] = to
+        r = self.session.get(f"{UPBIT_API_BASE}/{endpoint}", params=params, timeout=10)
         r.raise_for_status()
         items = r.json()
         # Upbit returns newest first
