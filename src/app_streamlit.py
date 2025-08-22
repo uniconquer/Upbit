@@ -2,7 +2,6 @@ import os
 import json
 from pathlib import Path
 import hashlib
-import threading
 from datetime import datetime, timedelta
 import streamlit as st
 from dotenv import load_dotenv
@@ -25,10 +24,18 @@ load_dotenv()
 st.set_page_config(page_title="Upbit Markets", layout="wide")
 
 # ---------------- 프로세스/재시작 진단 ----------------
-PROCESS_START_TS = getattr(__builtins__, 'UPBIT_APP_START_TS', None)
-if PROCESS_START_TS is None:
+_env_key = 'UPBIT_PROCESS_START_TS'
+_existing = os.environ.get(_env_key)
+if _existing:
+    try:
+        PROCESS_START_TS = float(_existing)
+    except Exception:
+        PROCESS_START_TS = time.time()
+        os.environ[_env_key] = str(PROCESS_START_TS)
+else:
     PROCESS_START_TS = time.time()
-    __builtins__.UPBIT_APP_START_TS = PROCESS_START_TS  # 전역 보관 (재런 유지)
+    # 프로세스 내부에서만 유지 (재런 시 그대로, 프로세스 재시작 시 초기화)
+    os.environ[_env_key] = str(PROCESS_START_TS)
 
 import tempfile
 DIAG_DIR = Path(tempfile.gettempdir()) / 'upbit_live_state'
