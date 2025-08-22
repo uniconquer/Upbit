@@ -610,35 +610,48 @@ elif view == 'live':
             per_request_sleep = st.number_input('마켓 사이 지연(초)', 0.0, 2.0, 0.12, 0.01, key='_live_per_request_sleep')
             live_possible = (os.getenv('UPBIT_LIVE') == '1') and bool(access and secret)
             live_orders_flag = st.checkbox('실제 주문 실행 (UPBIT_LIVE=1 필요, 매우 주의)', value=False, disabled=not live_possible, key='_live_live_orders')
-            submitted = st.form_submit_button('시작 / 재시작')
-            stop_clicked = st.form_submit_button('중지')
-        # 시작/중지 처리
-        if stop_clicked and 'live_monitor' in st.session_state:
-            for k in ['live_monitor','live_markets','live_loop_seconds','live_last_run','live_messages']:
-                st.session_state.pop(k, None)
-            st.success('라이브 중지됨')
-        if submitted:
-            # 초기화 후 새 모니터 생성
-            for k in ['live_monitor','live_markets','live_loop_seconds','live_last_run','live_messages']:
+            autorecover = st.checkbox('자동 복구(세션 끊겨도 재생성)', value=True, key='_live_autorecover')
+            start_clicked = st.form_submit_button('시작 / 재시작')
+        # 중지 버튼은 폼 밖(자동 재실행 시 오동작 방지)
+        if st.session_state.get('live_monitor'):
+            if st.button('중지', key='_live_stop', use_container_width=True):
+                for k in ['live_monitor','live_markets','live_loop_seconds','live_last_run']:
+                    st.session_state.pop(k, None)
+                # 메시지는 참고용으로 남길 수 있음
+                st.session_state['live_stopped'] = True
+                st.success('라이브 중지됨')
+        if start_clicked:
+            # 재시작 시 기존 모니터 제거 후 새로 생성
+            for k in ['live_monitor','live_markets','live_loop_seconds','live_last_run']:
                 st.session_state.pop(k, None)
             try:
                 mkts = fetch_top_markets(api, base='KRW', limit=int(markets_n))
             except Exception as e:
                 st.error(f'마켓 조회 실패: {e}')
                 mkts = []
-            mon = MRMonitor(api,
-                            interval=interval,
-                            bb_period=int(bb_period), bb_k=float(bb_k),
-                            rsi_buy=int(rsi_buy), rsi_sell=int(rsi_sell),
-                            exit_mid=exit_mid, stop_pct=stop_pct, take_pct=take_pct,
-                            live_orders=bool(live_orders_flag), krw_per_trade=float(krw_per_trade), max_open=int(max_open),
-                            min_fetch_seconds=float(min_fetch_seconds), per_request_sleep=float(per_request_sleep))
-            # 메시지 캡처
-            st.session_state['live_messages'] = []
-            def _ui_notify(msg: str):
+            cfg = {
+                'interval': interval,
+                'bb_period': int(bb_period), 'bb_k': float(bb_k),
+                'rsi_buy': int(rsi_buy), 'rsi_sell': int(rsi_sell),
+                'exit_mid': bool(exit_mid), 'stop_pct': float(stop_pct), 'take_pct': float(take_pct),
+                'live_orders': bool(live_orders_flag), 'krw_per_trade': float(krw_per_trade), 'max_open': int(max_open),
+                'min_fetch_seconds': float(min_fetch_seconds), 'per_request_sleep': float(per_request_sleep)
+            }
+            st.session_state['live_saved_config'] = cfg
+            st.session_state['live_stopped'] = False
+            mon = MRMonitor(api, **cfg)
+            if 'live_messages' not in st.session_state:
+                st.session_state['live_messages'] = []
+            else:
+                # 재시작 시 구분선 추가
+                st.session_state['live_messages'].append({'t': datetime.utcnow(), 'msg': '--- 재시작 ---'})
+            def _ui_notify(msg: str, _mon=mon):
                 st.session_state['live_messages'].append({'t': datetime.utcnow(), 'msg': msg})
-                if mon.notifier.available():
-                    mon.notifier.send_text(msg)
+                try:
+                    if _mon.notifier.available():
+                        _mon.notifier.send_text(msg)
+                except Exception:
+                    pass
             mon._notify = _ui_notify
             st.session_state['live_monitor'] = mon
             st.session_state['live_markets'] = mkts
@@ -647,6 +660,26 @@ elif view == 'live':
             st.success(f'라이브 시작: 대상 {len(mkts)}개')
     with live_col2:
         st.subheader('상태')
+        # 세션 끊김 등으로 모니터 객체가 없는데 자동 복구 설정되어 있고 저장된 설정이 있으면 재생성
+        if 'live_monitor' not in st.session_state and st.session_state.get('_live_autorecover') and st.session_state.get('live_saved_config') and not st.session_state.get('live_stopped'):
+            try:
+                cfg = st.session_state['live_saved_config']
+                mon_tmp = MRMonitor(api, **cfg)
+                def _ui_notify(msg: str, _mon=mon_tmp):
+                    st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': msg})
+                    try:
+                        if _mon.notifier.available():
+                            _mon.notifier.send_text(msg)
+                    except Exception:
+                        pass
+                mon_tmp._notify = _ui_notify
+                st.session_state['live_monitor'] = mon_tmp
+                st.session_state.setdefault('live_markets', fetch_top_markets(api, base='KRW', limit=int(st.session_state.get('_live_markets_n', 20))))
+                st.session_state.setdefault('live_loop_seconds', int(st.session_state.get('_live_loop_seconds', 120)))
+                st.session_state.setdefault('live_last_run', 0.0)
+                st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': '(자동 복구) 모니터 재생성'})
+            except Exception as _e:
+                st.warning(f'자동 복구 실패: {_e}')
         mon = st.session_state.get('live_monitor')
         if not mon:
             st.info('좌측에서 파라미터 설정 후 시작하세요.')
