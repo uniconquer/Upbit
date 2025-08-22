@@ -668,6 +668,8 @@ elif view == 'backtest':
 
 elif view == 'live':
     st.title('라이브 자동 매매 (Mean Reversion)')
+    if '_GLOBAL_MONITOR' not in globals():
+        _GLOBAL_MONITOR = {'monitor': None, 'config': None, 'markets': None}
     # ---------------- 영속 상태 저장/복구 유틸 ----------------
     # Streamlit 파일 감시 재실행을 피하기 위해 temp 디렉토리 사용 (프로세스 재시작에도 유지 가능)
     STATE_DIR = DIAG_DIR  # 동일 temp 경로 재사용
@@ -792,6 +794,14 @@ elif view == 'live':
                     pass
             mon._notify = _ui_notify
             st.session_state['live_monitor'] = mon
+            # 전역 저장소 업데이트
+            try:
+                if '_GLOBAL_MONITOR' in globals():
+                    _GLOBAL_MONITOR['monitor'] = mon
+                    _GLOBAL_MONITOR['config'] = cfg
+                    _GLOBAL_MONITOR['markets'] = mkts
+            except Exception:
+                pass
             st.session_state['live_markets'] = mkts
             st.session_state['live_loop_seconds'] = int(loop_seconds)
             st.session_state['live_last_run'] = 0.0
