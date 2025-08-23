@@ -27,64 +27,13 @@ if '_GLOBAL_MONITOR' not in globals():
 
 st.set_page_config(page_title="Upbit Markets", layout="wide")
 
-# ---------------- 프로세스/재시작 진단 ----------------
-_env_key = 'UPBIT_PROCESS_START_TS'
-_existing = os.environ.get(_env_key)
-if _existing:
-    try:
-        PROCESS_START_TS = float(_existing)
-    except Exception:
-        PROCESS_START_TS = time.time()
-        os.environ[_env_key] = str(PROCESS_START_TS)
-else:
-    PROCESS_START_TS = time.time()
-    # 프로세스 내부에서만 유지 (재런 시 그대로, 프로세스 재시작 시 초기화)
-    os.environ[_env_key] = str(PROCESS_START_TS)
-
 import tempfile
 DIAG_DIR = Path(tempfile.gettempdir()) / 'upbit_live_state'
 DIAG_DIR.mkdir(exist_ok=True)
-RUN_LOG_FILE = DIAG_DIR / 'run_log.txt'
-
-def _safe_append_log(line: str):
-    try:
-        with RUN_LOG_FILE.open('a', encoding='utf-8') as f:
-            f.write(line + '\n')
-    except Exception:
-        pass
-
-def _collect_code_fingerprint():
-    try:
-        root = Path(__file__).parent
-        mtimes = []
-        for p in root.glob('*.py'):
-            try:
-                mtimes.append(str(int(p.stat().st_mtime)))
-            except Exception:
-                pass
-        h = hashlib.sha1((';'.join(sorted(mtimes))).encode()).hexdigest()[:10]
-        return h
-    except Exception:
-        return 'na'
-
-if '_PROC_LOGGED' not in globals():
-    globals()['_PROC_LOGGED'] = True
-    fp = _collect_code_fingerprint()
-    _safe_append_log(f"PROC_START {datetime.utcnow().isoformat()}Z pid={os.getpid()} fp={fp}")
-
-if 'run_counter' not in st.session_state:
-    st.session_state['run_counter'] = 0
-    st.session_state['session_id'] = hashlib.sha1(os.urandom(8)).hexdigest()[:8]
-    _safe_append_log(f"SESSION_START {datetime.utcnow().isoformat()}Z pid={os.getpid()} sid={st.session_state['session_id']}")
-else:
-    if st.session_state['run_counter'] % 15 == 0:
-        _safe_append_log(f"RERUN {datetime.utcnow().isoformat()}Z pid={os.getpid()} rc={st.session_state['run_counter']} sid={st.session_state.get('session_id')}")
-st.session_state['run_counter'] += 1
+STATE_FILE = DIAG_DIR / 'live_state.json'
 
 def _format_uptime():
-    sec = int(time.time() - PROCESS_START_TS)
-    h = sec // 3600; m = (sec % 3600)//60; s = sec % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
+    return ''  # 디버그 제거로 사용 안 함
 
 
 @st.cache_data(ttl=30)
@@ -111,6 +60,19 @@ def load_markets_and_tickers(_api: UpbitAPI):
         })
     rows.sort(key=lambda r: float(r['value24h'] or 0), reverse=True)
     return rows
+
+# 전략 실행 주기 자동 산출 (사용자 입력 제거)
+def _auto_loop_for_interval(interval: str) -> int:
+    # 기준: 15m=180s, 30m=300s, 60m=600s, day=1800s (30분)
+    mapping = {
+        'minute15': 180,
+        'minute30': 300,
+        'minute60': 600,
+        'day': 1800,
+        'week': 3600,   # (보호적 기본) 1h
+        'month': 7200,  # 2h
+    }
+    return mapping.get(interval, 300)
 
 
 def fmt(v, digits=2):
@@ -157,7 +119,26 @@ def _set_query_params(**kwargs):
     except Exception:
         pass
 
-# 초기 뷰 결정: session_state -> URL -> 기본값
+# --- VERY EARLY: 디스크 상태 선제 로드 (세션 새로 시작 시 즉시 반영) ---
+def _early_load_disk_state():
+    if not STATE_FILE.exists():
+        return None
+    try:
+        with STATE_FILE.open('r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+_early_state = _early_load_disk_state()
+if _early_state and 'live_saved_config' not in st.session_state:
+    cfg = _early_state.get('config') or {}
+    st.session_state['live_saved_config'] = cfg
+    if 'loop_seconds' in _early_state:
+        st.session_state['_live_loop_seconds'] = _early_state.get('loop_seconds')
+    st.session_state['_live_autorecover'] = cfg.get('autorecover', True)
+    st.session_state['active_view'] = 'live'
+
+# 초기 뷰 결정: session_state -> URL -> 기본값 (이미 early state가 active_view 지정했으면 유지)
 if 'active_view' not in st.session_state:
     qp = _get_query_params()
     st.session_state['active_view'] = qp.get('view', ['markets'])[0] if isinstance(qp.get('view'), list) else qp.get('view', 'markets')
@@ -190,21 +171,7 @@ with st.sidebar:
     elif btn_lv:
         st.session_state['active_view'] = 'live'
     st.caption('세로 버튼: 클릭 시 즉시 전환 / 자동 새로고침 유지')
-    st.caption(f"Run #{st.session_state['run_counter']} (PID {os.getpid()}) Uptime {_format_uptime()}")
-    # 디버그 패널 토글
-    dbg_exp = st.expander('디버그 / 재시작 추적', expanded=False)
-    with dbg_exp:
-        st.write('run_log 최근 30줄:')
-        try:
-            if RUN_LOG_FILE.exists():
-                lines = RUN_LOG_FILE.read_text(encoding='utf-8').splitlines()[-30:]
-                for ln in lines:
-                    st.text(ln)
-            else:
-                st.text('로그 없음')
-        except Exception:
-            st.text('로그 읽기 오류')
-        st.caption('START 줄이 새 PID 와 함께 나타나면 실제 프로세스 재시작. RERUN 은 같은 프로세스 내 재실행.')
+    # 디버그 패널 제거됨
 
 # 라이브 모니터 동작 중이면 뷰 고정
 if 'live_monitor' in st.session_state and st.session_state['live_monitor'] is not None and st.session_state.get('active_view') != 'live':
@@ -684,6 +651,43 @@ elif view == 'live':
     st.title('라이브 자동 매매 (Mean Reversion)')
     if '_GLOBAL_MONITOR' not in globals():
         _GLOBAL_MONITOR = {'monitor': None, 'config': None, 'markets': None}
+    # ---- 폼 설정값 초기화 문제 방지: 저장된 config -> 위젯 session_state 1회 주입 ----
+    # 자동 새로고침 / 프로세스 재시작 후 세션이 새로 만들어질 때 위젯 값이 기본값으로 보이는 현상 수정
+    if (
+        'live_saved_config' in st.session_state
+        and not st.session_state.get('_live_form_seeded')
+    ):
+        cfg_seed = st.session_state['live_saved_config'] or {}
+        # mapping: widget_key -> (config_key, transform)
+        mapping = {
+            '_live_interval': ('interval', lambda v: v),
+            '_live_markets_n': ('markets_n', lambda v: v),  # 과거에 저장 안했을 수 있음 → 아래 보정
+            '_live_bb_period': ('bb_period', lambda v: v),
+            '_live_bb_k': ('bb_k', lambda v: v),
+            '_live_rsi_buy': ('rsi_buy', lambda v: v),
+            '_live_rsi_sell': ('rsi_sell', lambda v: v),
+            '_live_exit_mid': ('exit_mid', lambda v: v),
+            '_live_stop_pct': ('stop_pct', lambda v: (v or 0)*100),  # 내부는 0~1 → 위젯 % 값
+            '_live_take_pct': ('take_pct', lambda v: (v or 0)*100),
+            '_live_krw_per_trade': ('krw_per_trade', lambda v: v),
+            '_live_max_open': ('max_open', lambda v: v),
+            '_live_min_fetch_seconds': ('min_fetch_seconds', lambda v: v),
+            '_live_per_request_sleep': ('per_request_sleep', lambda v: v),
+            '_live_live_orders': ('live_orders', lambda v: v),
+            '_live_autorecover': ('autorecover', lambda v: v),
+        }
+        for w_key, (c_key, fn) in mapping.items():
+            if w_key not in st.session_state and c_key in cfg_seed:
+                try:
+                    st.session_state[w_key] = fn(cfg_seed.get(c_key))
+                except Exception:
+                    pass
+        # 과거 저장본에 markets_n 없을 경우 기본 추정: 현재 live_markets 길이
+        if '_live_markets_n' not in st.session_state:
+            mkts_seed = st.session_state.get('live_markets') or []
+            if mkts_seed:
+                st.session_state['_live_markets_n'] = len(mkts_seed)
+        st.session_state['_live_form_seeded'] = True
     # ---------------- 영속 상태 저장/복구 유틸 ----------------
     # Streamlit 파일 감시 재실행을 피하기 위해 temp 디렉토리 사용 (프로세스 재시작에도 유지 가능)
     STATE_DIR = DIAG_DIR  # 동일 temp 경로 재사용
@@ -714,6 +718,9 @@ elif view == 'live':
                     'win_trades': mon.win_trades,
                     'loss_trades': mon.loss_trades,
                     'current_streak': mon.current_streak
+                },
+                'flags': {
+                    'autorecover': st.session_state.get('_live_autorecover', True)
                 }
             }
             return data
@@ -745,11 +752,39 @@ elif view == 'live':
 
     live_col1, live_col2 = st.columns([30, 70])
     with live_col1:
+        # 인터벌은 폼 밖에서 즉시 반영 (폼 내부에서는 submit 전까지 재실행되지 않아 캡션이 늦게 갱신되므로)
+        st.subheader('설정')
+        interval = st.selectbox('캔들 인터벌', ['minute15','minute30','minute60','day'], index=0, key='_live_interval')
+        auto_loop_preview = _auto_loop_for_interval(interval)
+        st.caption(f"자동 실행 주기: 약 {auto_loop_preview}초 (인터벌 {interval} 기준)")
+        # 설정 요약 문자열 생성 헬퍼
+        def _build_cfg_summary(cfg: dict, markets_len: int | None=None):
+            try:
+                if not cfg:
+                    return '설정 정보 없음'
+                pct = lambda v: f"{v*100:.1f}%" if isinstance(v,(int,float)) else v
+                parts = [
+                    f"인터벌={cfg.get('interval')}",
+                    f"주기={cfg.get('loop_seconds')}s",
+                    f"마켓수={(markets_len if markets_len is not None else '-')}",
+                    f"BB={cfg.get('bb_period')},{cfg.get('bb_k')}",
+                    f"RSI매수<={cfg.get('rsi_buy')} / 매도>={cfg.get('rsi_sell')}",
+                    f"중심선청산={'Y' if cfg.get('exit_mid') else 'N'}",
+                    f"SL={pct(cfg.get('stop_pct'))}",
+                    f"TP={pct(cfg.get('take_pct'))}",
+                    f"KRW/트레이드={int(cfg.get('krw_per_trade',0))}",
+                    f"동시={cfg.get('max_open')}",
+                    f"재호출>={cfg.get('min_fetch_seconds')}s", 
+                    f"호출간지연={cfg.get('per_request_sleep')}s",
+                    f"모드={'LIVE' if cfg.get('live_orders') else 'SIM'}",
+                    f"자동복구={'Y' if cfg.get('autorecover') else 'N'}"
+                ]
+                return ' | '.join(parts)
+            except Exception:
+                return '설정 요약 실패'
         with st.form('live_params_form', clear_on_submit=False):
-            st.subheader('설정')
-            interval = st.selectbox('캔들 인터벌', ['minute15','minute30','minute60','day'], index=0, key='_live_interval')
             markets_n = st.number_input('거래대금 상위 N개 대상', 5, 200, 20, 5, key='_live_markets_n')
-            loop_seconds = st.number_input('주기(초)', 30, 600, 120, 10, key='_live_loop_seconds')
+            # 자동 주기 계산은 미리 위에서 프리뷰, 여기서는 변수만 유지
             bb_period = st.number_input('볼린저 밴드 기간', 10, 100, 20, 1, key='_live_bb_period')
             bb_k = st.number_input('볼린저 밴드 계수', 1.0, 4.0, 2.0, 0.1, key='_live_bb_k')
             rsi_buy = st.number_input('RSI 매수 이하', 5, 50, 30, 1, key='_live_rsi_buy')
@@ -764,11 +799,23 @@ elif view == 'live':
             per_request_sleep = st.number_input('마켓 사이 지연(초)', 0.0, 2.0, 0.12, 0.01, key='_live_per_request_sleep')
             live_possible = (os.getenv('UPBIT_LIVE') == '1') and bool(access and secret)
             live_orders_flag = st.checkbox('실제 주문 실행 (UPBIT_LIVE=1 필요, 매우 주의)', value=False, disabled=not live_possible, key='_live_live_orders')
-            autorecover = st.checkbox('자동 복구(세션 끊겨도 재생성)', value=True, key='_live_autorecover')
+            if '_live_autorecover' not in st.session_state:
+                st.session_state['_live_autorecover'] = True
+            autorecover = st.checkbox('자동 복구(세션 끊겨도 재생성)', key='_live_autorecover')
             start_clicked = st.form_submit_button('시작 / 재시작')
         # 중지 버튼은 폼 밖(자동 재실행 시 오동작 방지)
         if st.session_state.get('live_monitor'):
             if st.button('중지', key='_live_stop', use_container_width=True):
+                # 중지 알림 (먼저 mon 참조)
+                mon_stop = st.session_state.get('live_monitor')
+                stop_cfg = st.session_state.get('live_saved_config') or {}
+                try:
+                    msg = '[라이브 중지] ' + _build_cfg_summary(stop_cfg, markets_len=len(st.session_state.get('live_markets') or []))
+                    st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': msg})
+                    if mon_stop and getattr(mon_stop, 'notifier', None) and mon_stop.notifier.available():
+                        mon_stop.notifier.send_text(msg)
+                except Exception:
+                    pass
                 for k in ['live_monitor','live_markets','live_loop_seconds','live_last_run']:
                     st.session_state.pop(k, None)
                 # 메시지는 참고용으로 남길 수 있음
@@ -783,13 +830,23 @@ elif view == 'live':
             except Exception as e:
                 st.error(f'마켓 조회 실패: {e}')
                 mkts = []
+            # 방어적 캐스팅 (위젯 None/비정상 값 대비)
+            def _to_int(v, default):
+                try:
+                    if v is None: return default
+                    return int(v)
+                except Exception:
+                    return default
+            # 자동 주기
+            safe_loop = _auto_loop_for_interval(interval)
             cfg = {
                 'interval': interval,
                 'bb_period': int(bb_period), 'bb_k': float(bb_k),
                 'rsi_buy': int(rsi_buy), 'rsi_sell': int(rsi_sell),
                 'exit_mid': bool(exit_mid), 'stop_pct': float(stop_pct), 'take_pct': float(take_pct),
                 'live_orders': bool(live_orders_flag), 'krw_per_trade': float(krw_per_trade), 'max_open': int(max_open),
-                'min_fetch_seconds': float(min_fetch_seconds), 'per_request_sleep': float(per_request_sleep)
+                'min_fetch_seconds': float(min_fetch_seconds), 'per_request_sleep': float(per_request_sleep),
+                'loop_seconds': safe_loop, 'autorecover': bool(autorecover)
             }
             st.session_state['live_saved_config'] = cfg
             st.session_state['live_stopped'] = False
@@ -817,8 +874,18 @@ elif view == 'live':
             except Exception:
                 pass
             st.session_state['live_markets'] = mkts
-            st.session_state['live_loop_seconds'] = int(loop_seconds)
+            # 안전 캐스팅된 값 사용
+            st.session_state['live_loop_seconds'] = safe_loop
             st.session_state['live_last_run'] = 0.0
+            # 시작 알림
+            try:
+                start_msg = '[라이브 시작]' if not st.session_state.get('live_messages') else '[라이브 재시작]'
+                start_msg += ' ' + _build_cfg_summary(cfg, markets_len=len(mkts))
+                st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': start_msg})
+                if mon.notifier.available():
+                    mon.notifier.send_text(start_msg)
+            except Exception:
+                pass
             st.success(f'라이브 시작: 대상 {len(mkts)}개')
     with live_col2:
         st.subheader('상태')
@@ -866,14 +933,22 @@ elif view == 'live':
                     st.session_state.setdefault('live_markets', fetch_top_markets(api, base='KRW', limit=int(st.session_state.get('_live_markets_n', 20))))
                     st.session_state.setdefault('live_loop_seconds', int(st.session_state.get('_live_loop_seconds', 120)))
                     st.session_state.setdefault('live_last_run', 0.0)
-                st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': '(자동 복구) 모니터 재생성'})
+                # 자동 복구 알림
+                try:
+                    rec_cfg = st.session_state.get('live_saved_config') or cfg
+                    rec_msg = '[자동 복구]' + ' ' + _build_cfg_summary(rec_cfg, markets_len=len(st.session_state.get('live_markets') or []))
+                    st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': rec_msg})
+                    if mon_tmp.notifier.available():
+                        mon_tmp.notifier.send_text(rec_msg)
+                except Exception:
+                    pass
             except Exception as _e:
                 st.warning(f'자동 복구 실패: {_e}')
         mon = st.session_state.get('live_monitor')
         if not mon:
             st.info('좌측에서 파라미터 설정 후 시작하세요.')
         else:
-            loop_seconds = st.session_state.get('live_loop_seconds', 120)
+            loop_seconds = st.session_state.get('live_loop_seconds', _auto_loop_for_interval(st.session_state.get('_live_interval','minute15')))
             markets = st.session_state.get('live_markets', [])
             last_run = st.session_state.get('live_last_run', 0.0)
             now_ts = time.time()
@@ -886,7 +961,8 @@ elif view == 'live':
             else:
                 elapsed = 0; remaining = 0; progress_ratio = 0
                 _save_live_state()  # 실행 직후 저장
-            st_autorefresh_ms = min(max(loop_seconds, 10), 300) * 1000
+            # UI 자동 새로고침: loop_seconds 사용
+            st_autorefresh_ms = max(5, min(loop_seconds, 3600)) * 1000
             if st_autorefresh:
                 st_autorefresh(interval=st_autorefresh_ms, key='_live_autorefresh')
             else:
@@ -932,3 +1008,45 @@ elif view == 'live':
                 st.warning('UPBIT_LIVE=1 이 아니므로 실제 주문이 차단되고 있을 수 있습니다.')
             if not mon.live_orders:
                 st.caption('SIM 모드: 실제 주문 전송 안 함. 실매매하려면 UPBIT_LIVE=1 + 체크박스.')
+            # ---- 실행 루프: 주기 도달 시 모니터 처리 ----
+            # autorefresh 는 UI 갱신 트리거, 실제 매매 루프는 loop_seconds 기반 현재 시간 비교
+            try:
+                if due:
+                    # 실행 전 이벤트
+                    st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': f'[루프] 실행 시작 (주기 {loop_seconds}s)'} )
+                    processed = mon.run_cycle(markets=markets)
+                    st.session_state['live_last_run'] = time.time()
+                    _save_live_state()
+                    # 처리 결과 요약 메시지
+                    if processed and isinstance(processed, dict):
+                        summ = []
+                        for k,v in processed.items():
+                            try:
+                                if isinstance(v, (int,float)):
+                                    summ.append(f"{k}={v}")
+                            except Exception:
+                                pass
+                        if summ:
+                            st.session_state['live_messages'].append({'t': datetime.utcnow(), 'msg': '[루프] ' + ', '.join(summ)})
+                else:
+                    # Heartbeat (과도한 로그 방지: 1분마다)
+                    last_hb = st.session_state.get('_live_last_hb', 0)
+                    if time.time() - last_hb > 60:
+                        st.session_state['_live_last_hb'] = time.time()
+                        st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': '(heartbeat) 대기 중'})
+            except Exception as _loop_err:
+                st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': f'[에러] 루프 실패: {_loop_err}'})
+                st.error(f'루프 에러: {_loop_err}')
+                _save_live_state()
+
+            # ---- 통계 표시 ----
+            try:
+                stats_cols = st.columns(5)
+                stats_cols[0].metric('실현PnL', fmt(mon.total_realized_pnl,2))
+                stats_cols[1].metric('총 트레이드', mon.total_trades)
+                win_rate = (mon.win_trades / mon.total_trades * 100) if mon.total_trades else 0.0
+                stats_cols[2].metric('승률%', f"{win_rate:.1f}%")
+                stats_cols[3].metric('연승/연패', mon.current_streak)
+                stats_cols[4].metric('진행상태', '대기' if not due else '실행중')
+            except Exception:
+                pass
