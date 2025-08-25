@@ -2,7 +2,7 @@ import os
 import json
 from pathlib import Path
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import streamlit as st
 from dotenv import load_dotenv
 from upbit_api import UpbitAPI
@@ -20,6 +20,18 @@ except Exception:  # pragma: no cover - 호환성 처리
     st_autorefresh = None  # fallback 으로 meta refresh 사용
 
 load_dotenv()
+
+# ---- KST Time Helpers ----
+KST = timezone(timedelta(hours=9))
+def _now_utc():
+    return datetime.utcnow()
+def _to_kst(dt: datetime):
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(KST)
+    except Exception:
+        return dt
 
 # 글로벌 라이브 모니터 저장소 (세션 재생성 시 복구)
 if '_GLOBAL_MONITOR' not in globals():
@@ -151,7 +163,7 @@ if 'active_view' not in st.session_state:
             if _GLOBAL_MONITOR.get('markets'):
                 st.session_state['live_markets'] = _GLOBAL_MONITOR['markets']
             st.session_state['active_view'] = 'live'
-            st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': '(세션 복구) 라이브 자동 재부착'})
+            st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': '(세션 복구) 라이브 자동 재부착'})
     except Exception:
         pass
 
@@ -811,7 +823,7 @@ elif view == 'live':
                 stop_cfg = st.session_state.get('live_saved_config') or {}
                 try:
                     msg = '[라이브 중지] ' + _build_cfg_summary(stop_cfg, markets_len=len(st.session_state.get('live_markets') or []))
-                    st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': msg})
+                    st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': msg})
                     if mon_stop and getattr(mon_stop, 'notifier', None) and mon_stop.notifier.available():
                         mon_stop.notifier.send_text(msg)
                 except Exception:
@@ -855,9 +867,9 @@ elif view == 'live':
                 st.session_state['live_messages'] = []
             else:
                 # 재시작 시 구분선 추가
-                st.session_state['live_messages'].append({'t': datetime.utcnow(), 'msg': '--- 재시작 ---'})
+                st.session_state['live_messages'].append({'t': _now_utc(), 'msg': '--- 재시작 ---'})
             def _ui_notify(msg: str, _mon=mon):
-                st.session_state['live_messages'].append({'t': datetime.utcnow(), 'msg': msg})
+                st.session_state['live_messages'].append({'t': _now_utc(), 'msg': msg})
                 try:
                     if _mon.notifier.available():
                         _mon.notifier.send_text(msg)
@@ -881,7 +893,7 @@ elif view == 'live':
             try:
                 start_msg = '[라이브 시작]' if not st.session_state.get('live_messages') else '[라이브 재시작]'
                 start_msg += ' ' + _build_cfg_summary(cfg, markets_len=len(mkts))
-                st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': start_msg})
+                st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': start_msg})
                 if mon.notifier.available():
                     mon.notifier.send_text(start_msg)
             except Exception:
@@ -917,7 +929,7 @@ elif view == 'live':
                         if k in stv:
                             setattr(mon_tmp, k, stv[k])
                 def _ui_notify(msg: str, _mon=mon_tmp):
-                    st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': msg})
+                    st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': msg})
                     try:
                         if _mon.notifier.available():
                             _mon.notifier.send_text(msg)
@@ -937,7 +949,7 @@ elif view == 'live':
                 try:
                     rec_cfg = st.session_state.get('live_saved_config') or cfg
                     rec_msg = '[자동 복구]' + ' ' + _build_cfg_summary(rec_cfg, markets_len=len(st.session_state.get('live_markets') or []))
-                    st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': rec_msg})
+                    st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': rec_msg})
                     if mon_tmp.notifier.available():
                         mon_tmp.notifier.send_text(rec_msg)
                 except Exception:
@@ -991,7 +1003,7 @@ elif view == 'live':
                         '현재가': fmt(cur_price,4) if cur_price else '-',
                         '수익률%': f"{pnl_pct:.2f}%",
                         '수량≈': f"{p.volume:.6f}",
-                        '진입시각(UTC)': p.entry_time.strftime('%H:%M:%S')
+                        '진입시각(KST)': _to_kst(p.entry_time).strftime('%H:%M:%S')
                     })
                 st.markdown('**포지션**')
                 st.dataframe(pos_rows, hide_index=True, use_container_width=True)
@@ -1001,7 +1013,13 @@ elif view == 'live':
             msgs = st.session_state.get('live_messages', [])[-80:]
             if msgs:
                 for item in reversed(msgs):
-                    st.write(f"[{item['t'].strftime('%H:%M:%S')}] {item['msg']}")
+                    ts = item.get('t')
+                    try:
+                        kst_ts = _to_kst(ts)
+                        ts_txt = kst_ts.strftime('%H:%M:%S')
+                    except Exception:
+                        ts_txt = '-'
+                    st.write(f"[{ts_txt} KST] {item['msg']}")
             else:
                 st.caption('이벤트 없음')
             if mon.live_orders and os.getenv('UPBIT_LIVE') != '1':
@@ -1013,7 +1031,7 @@ elif view == 'live':
             try:
                 if due:
                     # 실행 전 이벤트
-                    st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': f'[루프] 실행 시작 (주기 {loop_seconds}s)'} )
+                    st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': f'[루프] 실행 시작 (주기 {loop_seconds}s)'} )
                     processed = mon.run_cycle(markets=markets)
                     st.session_state['live_last_run'] = time.time()
                     _save_live_state()
@@ -1027,15 +1045,15 @@ elif view == 'live':
                             except Exception:
                                 pass
                         if summ:
-                            st.session_state['live_messages'].append({'t': datetime.utcnow(), 'msg': '[루프] ' + ', '.join(summ)})
+                            st.session_state['live_messages'].append({'t': _now_utc(), 'msg': '[루프] ' + ', '.join(summ)})
                 else:
                     # Heartbeat (과도한 로그 방지: 1분마다)
                     last_hb = st.session_state.get('_live_last_hb', 0)
                     if time.time() - last_hb > 60:
                         st.session_state['_live_last_hb'] = time.time()
-                        st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': '(heartbeat) 대기 중'})
+                        st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': '(heartbeat) 대기 중'})
             except Exception as _loop_err:
-                st.session_state.setdefault('live_messages', []).append({'t': datetime.utcnow(), 'msg': f'[에러] 루프 실패: {_loop_err}'})
+                st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': f'[에러] 루프 실패: {_loop_err}'})
                 st.error(f'루프 에러: {_loop_err}')
                 _save_live_state()
 

@@ -20,7 +20,7 @@
 """
 from __future__ import annotations
 import os, time, math
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 import argparse
 import pandas as pd
@@ -80,6 +80,8 @@ class Position:
         self.volume = volume          # 추정/실제 수량
         self.krw_alloc = krw_alloc    # 사용한 KRW 금액 (매수 기준)
 
+KST = timezone(timedelta(hours=9))
+
 class MRMonitor:
     def __init__(self, api: UpbitAPI, interval: str = 'minute15',
                  bb_period: int = 20, bb_k: float = 2.0,
@@ -87,7 +89,7 @@ class MRMonitor:
                  exit_mid: bool = True, stop_pct: float = 0.0, take_pct: float = 0.0,
                  live_orders: bool = False, krw_per_trade: float = 5000.0, max_open: int = 5,
                  min_fetch_seconds: float = 20.0, per_request_sleep: float = 0.12,
-                 min_bandwidth_pct: float = 0.5):
+                 min_bandwidth_pct: float = 0.5, **_ignored_extra):
         """MR 모니터 초기화.
 
         min_bandwidth_pct: (%) Bollinger 상단-하단 / 중간 값 비율이 이 값보다 작으면 (너무 좁은 밴드 → 스테이블 가능성) 신호 무시.
@@ -141,9 +143,19 @@ class MRMonitor:
             return str(v)
 
     def _notify(self, msg: str):
+        # KST 타임스탬프 프리픽스
+        try:
+            now_kst = datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(KST)
+            ts_txt = now_kst.strftime('%H:%M:%S')
+            msg_out = f"[{ts_txt} KST] {msg}"
+        except Exception:
+            msg_out = msg
         if self.notifier.available():
-            self.notifier.send_text(msg)
-        print(msg)
+            try:
+                self.notifier.send_text(msg_out)
+            except Exception:
+                pass
+        print(msg_out)
 
     def _place_entry(self, market: str, close: float, rsi: float) -> Optional[Position]:
         if len(self.positions) >= self.max_open:
@@ -279,6 +291,28 @@ class MRMonitor:
                 except Exception as e:
                     print(f"process error {m}: {e}")
             time.sleep(loop_seconds)
+
+    # Streamlit 주기적 단일 패스 실행용 (블로킹 루프 대신 한 번 돌고 metric 반환)
+    def run_cycle(self, markets: List[str]):
+        start = time.time()
+        open_before = len(self.positions)
+        trades_before = self.total_trades
+        processed = 0
+        for m in markets:
+            try:
+                self.process_market(m)
+            except Exception as e:
+                print(f"run_cycle error {m}: {e}")
+            processed += 1
+        dur = time.time() - start
+        return {
+            'processed': processed,
+            'open': len(self.positions),
+            'open_delta': len(self.positions) - open_before,
+            'trades': self.total_trades,
+            'new_trades': self.total_trades - trades_before,
+            'dur_ms': int(dur * 1000)
+        }
 
 # ---------------- CLI ----------------
 def parse_args():
