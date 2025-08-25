@@ -959,10 +959,12 @@ elif view == 'live':
                 # 자동 복구 알림
                 try:
                     rec_cfg = st.session_state.get('live_saved_config') or cfg
-                    rec_msg = '[자동 복구] ' + _build_autorecover_summary(rec_cfg)
-                    st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': rec_msg})
-                    if mon_tmp.notifier.available():
-                        mon_tmp.notifier.send_text(rec_msg)
+                    # 요청: 자동복구 알림은 autorecover=False (비활성) 일 때만 전송
+                    if not rec_cfg.get('autorecover', True):
+                        rec_msg = '[자동 복구 비활성 상태 알림] ' + _build_autorecover_summary(rec_cfg)
+                        st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': rec_msg})
+                        if mon_tmp.notifier.available():
+                            mon_tmp.notifier.send_text(rec_msg)
                 except Exception:
                     pass
             except Exception as _e:
