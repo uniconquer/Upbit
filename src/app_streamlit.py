@@ -794,6 +794,17 @@ elif view == 'live':
                 return ' | '.join(parts)
             except Exception:
                 return '설정 요약 실패'
+        def _build_autorecover_summary(cfg: dict):
+            try:
+                if not cfg:
+                    return '정보없음'
+                interval = cfg.get('interval')
+                loop_s = cfg.get('loop_seconds')
+                mode = 'LIVE' if cfg.get('live_orders') else 'SIM'
+                ar = 'Y' if cfg.get('autorecover') else 'N'
+                return f"인터벌={interval} 주기={loop_s}s 모드={mode} 자동복구={ar}"
+            except Exception:
+                return '정보생성실패'
         with st.form('live_params_form', clear_on_submit=False):
             markets_n = st.number_input('거래대금 상위 N개 대상', 5, 200, 20, 5, key='_live_markets_n')
             # 자동 주기 계산은 미리 위에서 프리뷰, 여기서는 변수만 유지
@@ -948,7 +959,7 @@ elif view == 'live':
                 # 자동 복구 알림
                 try:
                     rec_cfg = st.session_state.get('live_saved_config') or cfg
-                    rec_msg = '[자동 복구]' + ' ' + _build_cfg_summary(rec_cfg, markets_len=len(st.session_state.get('live_markets') or []))
+                    rec_msg = '[자동 복구] ' + _build_autorecover_summary(rec_cfg)
                     st.session_state.setdefault('live_messages', []).append({'t': _now_utc(), 'msg': rec_msg})
                     if mon_tmp.notifier.available():
                         mon_tmp.notifier.send_text(rec_msg)
