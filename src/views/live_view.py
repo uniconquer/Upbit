@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time, threading
+import os
 from upbit_api import UpbitAPI
 from notifier import get_notifier
 from utils.formatters import fmt_full_number
@@ -89,12 +90,17 @@ def _ensure_lock():
         st.session_state['LIVE_LOCK']=threading.Lock()
 
 
-def _scan_core(params: dict, last_sig_state: dict) -> dict:
-    """순수 스캔 로직: streamlit API 비사용. last_sig_state 갱신하며 snapshot dict 반환."""
+def _scan_core(params: dict, last_state: dict) -> dict:
+    """순수 스캔 로직.
+    last_state: { market: { 'sig': str, 'entry': float|None } }
+    반환 snapshot dict.
+    """
     rank=_markets_rank()
     if rank.empty:
-        return {'table': pd.DataFrame(), 'detail': {}, 'last_sig': last_sig_state, 'notify': []}
+        return {'table': pd.DataFrame(), 'detail': {}, 'last_sig': last_state, 'notify': []}
     top_df=rank.head(int(params['topn'])).copy()
+    sim_mode = (os.getenv('UPBIT_LIVE') != '1')  # 환경변수 기반 시뮬 판단
+    sim_tag = "[SIM]" if sim_mode else ""
     sim_rows=[]; detail_cache={}; notifier_msgs=[]
     for _,r in top_df.iterrows():
         mk=r['market']; candles=_candles(mk, params['interval'], int(params['count']))
@@ -107,30 +113,58 @@ def _scan_core(params: dict, last_sig_state: dict) -> dict:
             df_all=raw.join(indi, how='left') if not indi.empty else raw
             bt=_simple_bt(df_all, fee=float(params['fee']))
             last_row=df_all.iloc[-1]
-            if bool(last_row.get('buy_signal')): sig='BUY'
-            elif bool(last_row.get('sell_signal')): sig='SELL'
-            else: sig='-'
-            prev=last_sig_state.get(mk)
-            if sig in ('BUY','SELL') and sig!=prev:
-                price_val=last_row.get('close')
-                try: price_txt=f"{float(price_val):.4f}" if price_val is not None else 'NA'
-                except Exception: price_txt=str(price_val)
-                notifier_msgs.append(f"[LIVE] {mk} {sig} price={price_txt} ret={bt['total_return_pct']:.2f}%")
-            last_sig_state[mk]=sig
-            sim_rows.append({'market':mk,'trades':bt['trades'],'total_return_pct':bt['total_return_pct'],'win_rate_pct':bt['win_rate_pct'],'max_drawdown_pct':bt['max_drawdown_pct'],'last_signal':sig,'price':last_row.get('close')})
+            close_price=last_row.get('close')
+            # 시그널 판별
+            if bool(last_row.get('buy_signal')): cur_sig='BUY'
+            elif bool(last_row.get('sell_signal')): cur_sig='SELL'
+            else: cur_sig='-'
+            st_prev=last_state.get(mk, {'sig':'-','entry':None})
+            prev_sig=st_prev.get('sig','-'); entry_price=st_prev.get('entry')
+            notify_msg=None
+            if cur_sig=='BUY' and prev_sig!='BUY':
+                # 새 진입
+                try: price_txt=f"{float(close_price):.4f}" if close_price is not None else 'NA'
+                except Exception: price_txt=str(close_price)
+                notify_msg=f"[LIVE]{(' ' + sim_tag) if sim_tag else ''} {mk} BUY price={price_txt} ret={bt['total_return_pct']:.2f}%"
+                entry_price=float(close_price) if close_price is not None else None
+            elif cur_sig=='SELL' and prev_sig=='BUY':
+                # 청산: pnl 계산
+                try:
+                    if entry_price and close_price:
+                        pnl_pct=(float(close_price)/float(entry_price)-1)*100
+                    else:
+                        pnl_pct=None
+                except Exception:
+                    pnl_pct=None
+                try: price_txt=f"{float(close_price):.4f}" if close_price is not None else 'NA'
+                except Exception: price_txt=str(close_price)
+                if pnl_pct is not None:
+                    pnl_txt=("+" if pnl_pct>=0 else "")+f"{pnl_pct:.2f}%"
+                else:
+                    pnl_txt='?'
+                ent_txt=f"{entry_price:.4f}" if entry_price else 'NA'
+                notify_msg=f"[LIVE]{(' ' + sim_tag) if sim_tag else ''} {mk} SELL price={price_txt} pnl={pnl_txt} (entry={ent_txt})"
+                # 청산 후 엔트리 초기화
+                entry_price=None
+            # 상태 저장
+            last_state[mk]={'sig':cur_sig,'entry': entry_price if cur_sig=='BUY' else None}
+            if notify_msg:
+                notifier_msgs.append(notify_msg)
+            sim_rows.append({'market':mk,'trades':bt['trades'],'total_return_pct':bt['total_return_pct'],'win_rate_pct':bt['win_rate_pct'],'max_drawdown_pct':bt['max_drawdown_pct'],'last_signal':cur_sig,'price':close_price})
             detail_cache[mk]={'df':df_all,'bt':bt}
         except Exception as e:
             sim_rows.append({'market':mk,'trades':0,'total_return_pct':0,'win_rate_pct':0,'max_drawdown_pct':0,'last_signal':'-','price':None,'error':repr(e)})
     res_df=pd.DataFrame(sim_rows)
     if not res_df.empty:
         res_df=res_df.sort_values('total_return_pct', ascending=False)
-    return {'table':res_df,'detail':detail_cache,'last_sig': last_sig_state,'notify': notifier_msgs,'last_run': time.time()}
+    return {'table':res_df,'detail':detail_cache,'last_sig': last_state,'notify': notifier_msgs,'last_run': time.time()}
 
 def _scan(params: dict):
     """메인 스레드용 스캔: session_state 업데이트."""
     _ensure_lock()
     with st.session_state['LIVE_LOCK']:
-        if 'LIVE_LAST_SIG' not in st.session_state: st.session_state['LIVE_LAST_SIG']={}
+        if 'LIVE_LAST_SIG' not in st.session_state:
+            st.session_state['LIVE_LAST_SIG']={}
         snapshot=_scan_core(params, st.session_state['LIVE_LAST_SIG'])
         st.session_state['LIVE_LAST_SIG']=snapshot['last_sig']
         st.session_state['LIVE_RESULTS']={'table':snapshot['table'],'detail':snapshot['detail']}
@@ -143,54 +177,69 @@ def _scan(params: dict):
 
 class _Worker:
     def __init__(self):
-        self.thread=None
-        self.stop_evt=threading.Event()
-        self.lock=threading.Lock()
-        self.last_sig_state={}
-        self.snapshot=None
-        self.last_error=None
-        self.params={}
-        self.interval=30
+        self.thread = None
+        self.stop_evt = threading.Event()
+        self.lock = threading.Lock()
+        self.last_sig_state: dict = {}
+        self.snapshot = None
+        self.last_error = None
+        self.params: dict = {}
+        self.interval = 30
+
     def update_params(self, params: dict):
         with self.lock:
             self.params = (params or {}).copy()
+
     def _get_params(self):
         with self.lock:
             return self.params.copy()
+
     def start(self, interval: int, initial_params: dict):
         self.stop()
         self.update_params(initial_params)
-        self.interval=interval
+        self.interval = interval
         self.stop_evt.clear()
+
         def loop():
             while not self.stop_evt.is_set():
                 try:
                     params = self._get_params()
-                    snap=_scan_core(params, self.last_sig_state)
-                    notifier=get_notifier()
+                    snap = _scan_core(params, self.last_sig_state)
+                    notifier = get_notifier()
                     if snap['notify'] and notifier and notifier.available():
                         for m in snap['notify'][:20]:
-                            try: notifier.send_text(m)
-                            except Exception: pass
+                            try:
+                                notifier.send_text(m)
+                            except Exception:
+                                pass
                     with self.lock:
-                        self.snapshot={'table':snap['table'],'detail':snap['detail'],'last_run':snap.get('last_run')}
+                        self.snapshot = {
+                            'table': snap['table'],
+                            'detail': snap['detail'],
+                            'last_run': snap.get('last_run')
+                        }
                 except Exception as e:
-                    self.last_error=repr(e)
+                    self.last_error = repr(e)
                 self.stop_evt.wait(self.interval)
-        self.thread=threading.Thread(target=loop, daemon=True)
+
+        self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()
+
     def stop(self):
         if self.thread and self.thread.is_alive():
-            self.stop_evt.set(); self.thread.join(timeout=0.5)
+            self.stop_evt.set()
+            self.thread.join(timeout=0.5)
+
     def get_snapshot(self):
         with self.lock:
             return self.snapshot
+
     def get_error(self):
         return self.last_error
 
 
 def render_live():
-    st.header('라이브 (리팩터링 뷰)')
+    st.header('라이브 뷰)')
     if not api:
         st.error('API 초기화 안됨')
         return
@@ -213,6 +262,28 @@ def render_live():
     prev=st.session_state.get('LIVE_PARAMS') or {}
     changed=any(prev.get(k)!=v for k,v in params.items())
     st.session_state['LIVE_PARAMS']=params
+
+    # ---- Step 1: 실거래 토글 & 확인 ----
+    with st.expander('실거래 설정', expanded=False):
+        c1,c2,c3=st.columns([1,1,2])
+        raw_enable = c1.checkbox('실거래 활성', value=st.session_state.get('LIVE_TRADING_RAW', False), key='live_trading_raw')
+        confirm_txt = c2.text_input('확인문자 (LIVE 입력)', value=st.session_state.get('LIVE_TRADING_CONFIRM',''), key='live_trading_confirm')
+        # 환경변수 UPBIT_LIVE=1 이어야 실제 주문 가능 (API 모드)
+        env_live = (os.getenv('UPBIT_LIVE')=='1')
+        active = bool(raw_enable and confirm_txt.strip().upper()=='LIVE' and env_live)
+        st.session_state['LIVE_TRADING'] = active
+        st.session_state['LIVE_TRADING_RAW'] = raw_enable
+        st.session_state['LIVE_TRADING_CONFIRM'] = confirm_txt
+        if not env_live:
+            st.info('환경변수 UPBIT_LIVE=1 이 아니므로 실제 주문은 전송되지 않고 SIM 모드입니다.')
+        elif raw_enable and confirm_txt.strip().upper()!='LIVE':
+            st.warning('확인문자를 LIVE 로 입력해야 활성됩니다.')
+        elif active:
+            st.success('실거래 활성화됨 (LIVE 모드)')
+
+    is_live_mode = (os.getenv('UPBIT_LIVE')=='1' and st.session_state.get('LIVE_TRADING'))
+    mode_badge = '🟢 LIVE' if is_live_mode else '🟡 SIM'
+    st.markdown(f"**모드:** {mode_badge}")
     wkcol1,wkcol2,wkcol3=st.columns([1,1,2])
     worker_interval=wkcol1.number_input('워커주기(초)',5,3600,30,1,key='live2_worker_interval')
     start_btn=wkcol2.button('워커 시작' if not st.session_state.get('LIVE_WORKING') else '재시작', key='live2_start')
