@@ -103,10 +103,9 @@ div[data-testid="stDataFrame"] {
 
 
 def inject_app_styles() -> None:
-    if st.session_state.get("_upbit_theme_loaded"):
-        return
+    # Streamlit reruns can rebuild the page tree, so inject the theme stylesheet
+    # on every run instead of caching it in session state.
     st.markdown(APP_STYLE, unsafe_allow_html=True)
-    st.session_state["_upbit_theme_loaded"] = True
 
 
 def page_intro(eyebrow: str, title: str, body: str) -> None:

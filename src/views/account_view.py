@@ -2,7 +2,8 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 from upbit_api import UpbitAPI
-from utils.formatters import fmt_full_number, fmt_coin_amount, fmt_price, signed_color
+from ui_theme import page_intro
+from utils.formatters import fmt_full_number, fmt_coin_amount, fmt_price
 
 api: UpbitAPI | None = None
 
@@ -36,7 +37,11 @@ def _all_markets_set():
         return set()
 
 def render_account():
-    st.header('내 자산')
+    page_intro(
+        "계좌",
+        "내 자산",
+        "업비트 계좌 잔고와 평가손익을 현재 시세 기준으로 요약합니다. 이 화면은 다크 테마 기준이 정상입니다.",
+    )
     if not api:
         st.error('API 초기화 안됨')
         return
@@ -124,19 +129,4 @@ def render_account():
     row2[1].metric('평가손익', fmt_full_number(evaluation_profit,0) if evaluation_profit is not None else '-')
     row2[2].metric('수익률', f"{roi:.2f}%" if roi is not None else '-')
     df = pd.DataFrame(rows)
-    if not df.empty and '손익%' in df.columns:
-        def style_pnl(col):
-            styled=[]
-            for v in col:
-                if isinstance(v,str) and v.endswith('%'):
-                    try:
-                        num=float(v[:-1]); color=signed_color(num); styled.append(f'color: {color};' if color!='inherit' else '')
-                    except Exception:
-                        styled.append('')
-                else:
-                    styled.append('')
-            return styled
-        styled_df = df.style.apply(style_pnl, subset=['손익%'])
-        st.dataframe(styled_df, hide_index=True, use_container_width=True)
-    else:
-        st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, use_container_width=True)
