@@ -24,7 +24,7 @@
 - `src/app_streamlit.py`: Streamlit entrypoint and view wiring.
 - `src/views/backtest_view.py`: indicator exploration and quick backtest UI.
 - `src/views/live_view.py`: live scan UI, risk limits, worker loop, and session-state runtime.
-- `src/mr_worker.py`: CLI mean-reversion monitor with optional live order path.
+- `src/mr_worker.py`: CLI strategy monitor that shares the refactored strategy, risk, and paper-trading stack.
 - `src/upbit_api.py`: Upbit REST/WebSocket client and order submission gate.
 - `src/notifier.py`: Telegram notification adapter.
 - `src/main.py`: small CLI for markets, ticker, bollinger, accounts, and order smoke checks.

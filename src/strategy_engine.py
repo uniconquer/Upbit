@@ -6,7 +6,10 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from strategy import build_research_trend_signals
+try:
+    from strategy import build_research_trend_signals
+except ImportError:
+    from src.strategy import build_research_trend_signals
 
 FluxCallable = Callable[..., pd.DataFrame] | None
 

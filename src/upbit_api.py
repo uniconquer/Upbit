@@ -153,6 +153,19 @@ class UpbitAPI:
         r.raise_for_status()
         return r.json()
 
+    def get_order(self, uuid: Optional[str] = None, identifier: Optional[str] = None) -> Dict[str, Any]:
+        if not uuid and not identifier:
+            raise ValueError("uuid or identifier is required")
+        query: Dict[str, Any] = {}
+        if uuid:
+            query["uuid"] = uuid
+        if identifier:
+            query["identifier"] = identifier
+        headers = self._auth_headers(query)
+        r = self.session.get(f"{UPBIT_API_BASE}/order", params=query, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json()
+
     def create_order(self, market: str, side: str, ord_type: str,
                      volume: Optional[str] = None, price: Optional[str] = None,
                      simulate: bool = False) -> Dict[str, Any]:

@@ -15,6 +15,7 @@ class PaperPosition:
     cost: float
     opened_at: float
     strategy: str = "paper"
+    entry_order_uuid: str | None = None
 
     @classmethod
     def from_dict(cls, market: str, raw: Mapping[str, Any]) -> "PaperPosition":
@@ -25,6 +26,7 @@ class PaperPosition:
             cost=float(raw.get("cost") or 0.0),
             opened_at=float(raw.get("opened_at") or time.time()),
             strategy=str(raw.get("strategy") or "paper"),
+            entry_order_uuid=str(raw.get("entry_order_uuid")) if raw.get("entry_order_uuid") else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,16 +69,19 @@ class PaperTrader:
         price: float,
         cost: float,
         strategy: str,
+        qty: float | None = None,
+        order_uuid: str | None = None,
         timestamp: float | None = None,
     ) -> dict[str, Any]:
-        qty = (float(cost) / float(price)) if price else 0.0
+        resolved_qty = float(qty) if qty is not None else ((float(cost) / float(price)) if price else 0.0)
         position = PaperPosition(
             market=market,
-            qty=qty,
+            qty=resolved_qty,
             entry=float(price),
             cost=float(cost),
             opened_at=float(timestamp or time.time()),
             strategy=strategy,
+            entry_order_uuid=order_uuid,
         )
         self.positions[market] = position
         return {
@@ -87,6 +92,7 @@ class PaperTrader:
             "qty": position.qty,
             "cost": position.cost,
             "strategy": strategy,
+            "order_uuid": order_uuid,
         }
 
     def exit_long(
@@ -95,6 +101,7 @@ class PaperTrader:
         market: str,
         price: float,
         reason: str,
+        order_uuid: str | None = None,
         timestamp: float | None = None,
     ) -> dict[str, Any] | None:
         position = self.positions.pop(market, None)
@@ -116,6 +123,7 @@ class PaperTrader:
             "pnl_pct": pnl_pct,
             "reason": reason,
             "strategy": position.strategy,
+            "order_uuid": order_uuid,
         }
 
     def to_state(self) -> dict[str, dict[str, Any]]:
