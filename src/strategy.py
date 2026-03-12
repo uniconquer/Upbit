@@ -1,29 +1,20 @@
-"""Strategy utilities & example signal generators.
+"""Strategy helpers, signal generators, and simple backtest utilities."""
 
-현재 UI / 간소화 방향에서는 대규모 백테스트 프레임워크를 제거했지만,
-추후 확장을 위해 재사용 가능한 최소 전략 함수들을 정리한 모듈입니다.
-
-핵심 아이디어:
- - 모든 전략은 prices(시가/종가 등 float 시퀀스) -> [Signal] 형태 반환
- - 교차(Cross) 로직, 기준선 위/아래 여부 판정 등은 공통 헬퍼로 중복 제거
- - 추후 새로운 지표/전략은 동일한 패턴으로 간단히 추가
-"""
+from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence, Iterable, Callable
+from typing import Sequence
+
+import numpy as np
 import pandas as pd
 
 
 @dataclass(slots=True)
 class Signal:
     index: int
-    side: str   # 'buy' | 'sell'
+    side: str
     price: float
 
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
 
 def _validate_length(prices: Sequence[float], min_len: int) -> bool:
     return len(prices) >= min_len
@@ -32,139 +23,300 @@ def _validate_length(prices: Sequence[float], min_len: int) -> bool:
 def sma(prices: Sequence[float], window: int) -> pd.Series:
     if window <= 0:
         raise ValueError("window > 0 required")
-    return pd.Series(prices).rolling(window).mean()
+    return pd.Series(prices, dtype=float).rolling(window).mean()
 
 
 def ema(prices: Sequence[float], window: int) -> pd.Series:
     if window <= 0:
         raise ValueError("window > 0 required")
-    return pd.Series(prices).ewm(span=window, adjust=False).mean()
+    return pd.Series(prices, dtype=float).ewm(span=window, adjust=False).mean()
 
 
-def _crossover_signals(fast: pd.Series, slow: pd.Series, base_prices: Sequence[float], start_index: int) -> list[Signal]:
-    """Generic cross (fast > slow) generator.
-
-    start_index: 첫 신호 평가 시작 위치 (충분한 기간 확보 후)
-    """
-    sigs: list[Signal] = []
+def _crossover_signals(
+    fast: pd.Series,
+    slow: pd.Series,
+    base_prices: Sequence[float],
+    start_index: int,
+) -> list[Signal]:
+    signals: list[Signal] = []
     prev_state: bool | None = None
-    for i in range(start_index, len(fast)):
-        f = fast.iloc[i]; s = slow.iloc[i]
-        if pd.isna(f) or pd.isna(s):
+
+    for idx in range(start_index, len(fast)):
+        fast_value = fast.iloc[idx]
+        slow_value = slow.iloc[idx]
+        if pd.isna(fast_value) or pd.isna(slow_value):
             continue
-        cur_state = f > s
+
+        current_state = bool(fast_value > slow_value)
         if prev_state is None:
-            prev_state = cur_state
+            prev_state = current_state
             continue
-        if cur_state and not prev_state:
-            sigs.append(Signal(index=i, side='buy', price=float(base_prices[i])))
-        elif (not cur_state) and prev_state:
-            sigs.append(Signal(index=i, side='sell', price=float(base_prices[i])))
-        prev_state = cur_state
-    return sigs
 
+        if current_state and not prev_state:
+            signals.append(Signal(index=idx, side="buy", price=float(base_prices[idx])))
+        elif (not current_state) and prev_state:
+            signals.append(Signal(index=idx, side="sell", price=float(base_prices[idx])))
+        prev_state = current_state
 
-# ---------------------------------------------------------------------------
-# Strategy implementations
-# ---------------------------------------------------------------------------
+    return signals
+
 
 def sma_cross_signals(prices: Sequence[float], short: int = 5, long: int = 20) -> list[Signal]:
-    """단순 이동평균 교차.
-
-    buy : SMA(short) 가 SMA(long) 위로 교차
-    sell: SMA(short) 가 SMA(long) 아래로 교차
-    """
     if long <= short:
         raise ValueError("long must be > short")
     if not _validate_length(prices, long + 1):
         return []
+
     fast = sma(prices, short)
     slow = sma(prices, long)
     return _crossover_signals(fast, slow, prices, start_index=long)
 
 
 def ema_cross_signals(prices: Sequence[float], short: int = 5, long: int = 20) -> list[Signal]:
-    """지수 이동평균 교차."""
     if long <= short:
         raise ValueError("long must be > short")
     if not _validate_length(prices, long + 1):
         return []
+
     fast = ema(prices, short)
     slow = ema(prices, long)
     return _crossover_signals(fast, slow, prices, start_index=long)
 
 
 def momentum_signals(prices: Sequence[float], long: int = 50) -> list[Signal]:
-    """가격이 장기 SMA 위/아래를 기준으로 포지션 전환 (단순 모멘텀)."""
     if not _validate_length(prices, long + 2):
         return []
+
     baseline = sma(prices, long)
-    # baseline 과 price 자체를 비교하므로 fast=price, slow=baseline 으로 크로스 적용
-    fast = pd.Series(prices)
+    fast = pd.Series(prices, dtype=float)
     return _crossover_signals(fast, baseline, prices, start_index=long)
 
 
-def rsi_signals(prices: Sequence[float], period: int = 14, oversold: float = 30.0, overbought: float = 70.0) -> list[Signal]:
-    """RSI 기준선 (oversold / overbought) 교차 신호.
-
-    buy : RSI 가 oversold 아래 -> 이상 교차
-    sell: RSI 가 overbought 위 -> 이하 교차
-    """
+def rsi_signals(
+    prices: Sequence[float],
+    period: int = 14,
+    oversold: float = 30.0,
+    overbought: float = 70.0,
+) -> list[Signal]:
     if period <= 1 or oversold >= overbought:
         return []
     if not _validate_length(prices, period + 2):
         return []
-    s = pd.Series(prices)
-    delta = s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+
+    series = pd.Series(prices, dtype=float)
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
     avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    sigs: list[Signal] = []
-    prev_val: float | None = None
-    for i in range(period + 1, len(rsi)):
-        cur = rsi.iloc[i]
-        if pd.isna(cur):
+
+    signals: list[Signal] = []
+    previous_rsi: float | None = None
+    for idx in range(period + 1, len(rsi)):
+        current_rsi = rsi.iloc[idx]
+        if pd.isna(current_rsi):
             continue
-        cur_f = float(cur)
-        if prev_val is not None:
-            if prev_val < oversold <= cur_f:
-                sigs.append(Signal(index=i, side='buy', price=float(s.iloc[i])))
-            elif prev_val > overbought >= cur_f:
-                sigs.append(Signal(index=i, side='sell', price=float(s.iloc[i])))
-        prev_val = cur_f
-    return sigs
+        current_value = float(current_rsi)
+        if previous_rsi is not None:
+            if previous_rsi < oversold <= current_value:
+                signals.append(Signal(index=idx, side="buy", price=float(series.iloc[idx])))
+            elif previous_rsi > overbought >= current_value:
+                signals.append(Signal(index=idx, side="sell", price=float(series.iloc[idx])))
+        previous_rsi = current_value
+
+    return signals
 
 
-# ---------------------------------------------------------------------------
-# Reference help text (optional for UI/Docs)
-# ---------------------------------------------------------------------------
+def average_true_range(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    if window <= 0:
+        raise ValueError("window > 0 required")
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return true_range.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
+
+
+def average_directional_index(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    if window <= 0:
+        raise ValueError("window > 0 required")
+
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
+        index=df.index,
+        dtype=float,
+    )
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+        index=df.index,
+        dtype=float,
+    )
+
+    atr = average_true_range(df, window).replace(0.0, np.nan)
+    plus_di = 100 * plus_dm.ewm(alpha=1 / window, adjust=False, min_periods=window).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / window, adjust=False, min_periods=window).mean() / atr
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, np.nan)) * 100
+    return dx.ewm(alpha=1 / window, adjust=False, min_periods=window).mean().fillna(0.0)
+
+
+def build_research_trend_signals(
+    raw: pd.DataFrame,
+    *,
+    fast_ema: int = 21,
+    slow_ema: int = 55,
+    breakout_window: int = 20,
+    exit_window: int = 10,
+    atr_window: int = 14,
+    atr_mult: float = 2.5,
+    adx_window: int = 14,
+    adx_threshold: float = 18.0,
+    momentum_window: int = 20,
+    volume_window: int = 20,
+    volume_threshold: float = 0.9,
+) -> pd.DataFrame:
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(raw.columns):
+        missing = ", ".join(sorted(required - set(raw.columns)))
+        raise ValueError(f"raw data missing columns: {missing}")
+
+    df = raw.copy()
+    close = df["close"].astype(float)
+    df["ema_fast"] = ema(close.tolist(), fast_ema)
+    df["ema_slow"] = ema(close.tolist(), slow_ema)
+    df["atr"] = average_true_range(df, atr_window)
+    df["adx"] = average_directional_index(df, adx_window)
+    df["breakout_high"] = df["high"].rolling(breakout_window).max().shift(1)
+    df["breakdown_low"] = df["low"].rolling(exit_window).min().shift(1)
+    df["volume_ratio"] = df["volume"] / df["volume"].rolling(volume_window).mean().replace(0.0, np.nan)
+    df["momentum"] = close.pct_change(momentum_window)
+    df["volatility"] = df["atr"] / close.replace(0.0, np.nan)
+    df["trend_strength"] = (df["ema_fast"] / df["ema_slow"]) - 1.0
+    df["atr_stop"] = df["ema_slow"] - (atr_mult * df["atr"])
+    df["strategy_score"] = (
+        df["momentum"].fillna(0.0) * 100.0
+        + df["trend_strength"].fillna(0.0) * 80.0
+        + (df["adx"].fillna(0.0) - adx_threshold) / 10.0
+        - df["volatility"].fillna(0.0) * 50.0
+    )
+
+    regime_ok = (close > df["ema_fast"]) & (df["ema_fast"] > df["ema_slow"]) & (df["adx"] >= adx_threshold)
+    breakout = close > df["breakout_high"]
+    volume_ok = df["volume_ratio"].fillna(1.0) >= volume_threshold
+    raw_buy = regime_ok & breakout & volume_ok
+
+    exit_break = close < df["breakdown_low"]
+    trend_fail = (close < df["ema_fast"]) | (df["adx"] < max(10.0, adx_threshold - 6.0))
+    raw_sell = exit_break | (close < df["atr_stop"]) | trend_fail
+
+    df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
+    df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
+def backtest_signal_frame(
+    df: pd.DataFrame,
+    *,
+    entry_col: str = "buy_signal",
+    exit_col: str = "sell_signal",
+    fee: float = 0.0005,
+) -> dict[str, object]:
+    empty_result = {
+        "trades": 0,
+        "total_return_pct": 0.0,
+        "win_rate_pct": 0.0,
+        "max_drawdown_pct": 0.0,
+        "equity": None,
+    }
+    if df.empty or "close" not in df.columns or entry_col not in df.columns or exit_col not in df.columns:
+        return empty_result
+
+    in_position = False
+    entry_price = 0.0
+    equity_curve: list[float] = []
+    equity_value = 1.0
+    trades: list[float] = []
+    peak = 1.0
+    max_drawdown = 0.0
+
+    for _, row in df.iterrows():
+        price = row.get("close")
+        if price is None or pd.isna(price):
+            continue
+
+        if (not in_position) and bool(row.get(entry_col)):
+            in_position = True
+            entry_price = float(price)
+
+        if in_position and bool(row.get(exit_col)):
+            gross = float(price) / entry_price
+            net = gross * (1 - fee) * (1 - fee)
+            equity_value *= net
+            trades.append((net - 1) * 100)
+            in_position = False
+
+        equity_curve.append(equity_value)
+        peak = max(peak, equity_value)
+        drawdown = ((equity_value / peak) - 1) * 100 if peak else 0.0
+        max_drawdown = min(max_drawdown, drawdown)
+
+    if not equity_curve:
+        return empty_result
+
+    total_return_pct = (equity_curve[-1] - 1) * 100
+    win_rate_pct = (sum(1 for trade in trades if trade > 0) / len(trades) * 100) if trades else 0.0
+    return {
+        "trades": len(trades),
+        "total_return_pct": total_return_pct,
+        "win_rate_pct": win_rate_pct,
+        "max_drawdown_pct": max_drawdown,
+        "equity": pd.Series(equity_curve, index=df.index[: len(equity_curve)]),
+    }
+
+
 SMA_HELP_MD = (
-    "### SMA Cross 전략\n\n"
-    "단기 / 장기 단순이동평균 교차.\n"
-    "- 골든크로스: 단기가 장기 위로 -> buy\n"
-    "- 데드크로스: 단기가 장기 아래로 -> sell\n"
-    "장점: 단순 & 추세 구간 효율 | 단점: 횡보 구간 노이즈"
+    "### SMA Cross\n\n"
+    "Short moving average crossing the long moving average.\n"
+    "- Cross up: buy\n"
+    "- Cross down: sell\n"
 )
 
+
 STRATEGY_HELP = {
-    'sma_cross': '단순 이동평균 교차 (short,long)',
-    'ema_cross': '지수 이동평균 교차 (short,long)',
-    'momentum': '가격 vs SMA(long) 교차 기반 보유/청산',
-    'rsi': 'RSI 기준선(oversold/overbought) 역방향 이탈 교차'
+    "sma_cross": "Simple moving-average crossover",
+    "ema_cross": "Exponential moving-average crossover",
+    "momentum": "Price versus longer SMA crossover",
+    "rsi": "RSI oversold/overbought crossback",
+    "research_trend": "EMA trend + breakout + ADX + ATR exit",
 }
 
 
 __all__ = [
-    'Signal',
-    'sma_cross_signals',
-    'ema_cross_signals',
-    'momentum_signals',
-    'rsi_signals',
-    'sma',
-    'ema',
-    'SMA_HELP_MD',
-    'STRATEGY_HELP'
+    "Signal",
+    "SMA_HELP_MD",
+    "STRATEGY_HELP",
+    "average_directional_index",
+    "average_true_range",
+    "backtest_signal_frame",
+    "build_research_trend_signals",
+    "ema",
+    "ema_cross_signals",
+    "momentum_signals",
+    "rsi_signals",
+    "sma",
+    "sma_cross_signals",
 ]

@@ -1,346 +1,577 @@
 from __future__ import annotations
-import streamlit as st
-import pandas as pd
-import numpy as np
-import time, threading
+
 import os
-from upbit_api import UpbitAPI
+import threading
+import time
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from plotly.subplots import make_subplots
+
 from notifier import get_notifier
+from paper_trader import PaperTrader
+from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
+from strategy import backtest_signal_frame
+from strategy_engine import build_strategy_frame, strategy_label, strategy_options
+from ui_theme import apply_chart_theme, page_intro
+from upbit_api import UpbitAPI
 from utils.formatters import fmt_full_number
+
 
 api: UpbitAPI | None = None
 flux_indicator = None
 
-# --- 내부 TTL 캐시 (Streamlit 비의존) ---
-_MARKETS_CACHE = {'data': None, 'ts': 0.0}
-_CANDLES_CACHE = {}  # key=(market, interval, count) => {'data':df,'ts':t}
-_CACHE_NOW = time.time  # alias
+_MARKETS_CACHE = {"data": None, "ts": 0.0}
+_CANDLES_CACHE: dict[tuple[str, str, int], dict[str, object]] = {}
 
-# 외부에서 init
 
 def init_api(a: UpbitAPI, flux):
     global api, flux_indicator
-    api = a; flux_indicator = flux
+    api = a
+    flux_indicator = flux
 
-def _markets_rank():
-    ttl=120
-    now=_CACHE_NOW()
-    if _MARKETS_CACHE['data'] is not None and (now - _MARKETS_CACHE['ts'] < ttl):
-        return _MARKETS_CACHE['data']
+
+def _markets_rank() -> pd.DataFrame:
+    now = time.time()
+    if _MARKETS_CACHE["data"] is not None and now - float(_MARKETS_CACHE["ts"]) < 120:
+        return _MARKETS_CACHE["data"]  # type: ignore[return-value]
     if not api:
         return pd.DataFrame()
     try:
-        ms=api.markets(); dfm=pd.DataFrame(ms)
-        if dfm.empty:
-            _MARKETS_CACHE.update({'data':pd.DataFrame(),'ts':now}); return pd.DataFrame()
-        dfm=dfm[dfm['market'].str.startswith('KRW-')]
-        mk_list=dfm['market'].tolist(); tk=api.tickers(mk_list); dft=pd.DataFrame(tk)
-        if not dft.empty:
-            dft=dft[['market','acc_trade_price_24h','acc_trade_volume_24h','trade_price']]
-        out=dfm.merge(dft, on='market', how='left')
-        out['acc_trade_price_24h']=pd.to_numeric(out['acc_trade_price_24h'], errors='coerce')
-        out=out.sort_values('acc_trade_price_24h', ascending=False)
-        _MARKETS_CACHE.update({'data':out,'ts':now})
-        return out
+        markets = pd.DataFrame(api.markets())
+        markets = markets[markets["market"].str.startswith("KRW-")]
+        tickers = pd.DataFrame(api.tickers(markets["market"].tolist()))
+        merged = markets.merge(
+            tickers[["market", "trade_price", "acc_trade_price_24h", "acc_trade_volume_24h"]],
+            on="market",
+            how="left",
+        )
+        merged["acc_trade_price_24h"] = pd.to_numeric(merged["acc_trade_price_24h"], errors="coerce")
+        merged = merged.sort_values("acc_trade_price_24h", ascending=False)
+        _MARKETS_CACHE.update({"data": merged, "ts": now})
+        return merged
     except Exception:
         return pd.DataFrame()
 
-def _candles(market: str, interval: str, count: int):
-    ttl=60; now=_CACHE_NOW(); key=(market, interval, int(count))
-    ce=_CANDLES_CACHE.get(key)
-    if ce and (now - ce['ts'] < ttl):
-        return ce['data']
+
+@st.cache_data(ttl=45)
+def _candles(market: str, interval: str, count: int) -> pd.DataFrame:
     if not api:
         return pd.DataFrame()
     try:
-        cds=api.candles(market, interval=interval, count=count)
-        rows=[{'time':c.timestamp,'open':c.open,'high':c.high,'low':c.low,'close':c.close,'volume':c.volume} for c in cds]
-        df=pd.DataFrame(rows)
-        if not df.empty:
-            df['dt']=pd.to_datetime(df['time'], unit='ms')
-            df=df.set_index('dt').sort_index()
-        _CANDLES_CACHE[key]={'data':df,'ts':now}
-        return df
+        candles = api.candles(market, interval=interval, count=count)
+        frame = pd.DataFrame(
+            [
+                {
+                    "time": candle.timestamp,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                }
+                for candle in candles
+            ]
+        )
+        if not frame.empty:
+            frame["dt"] = pd.to_datetime(frame["time"], unit="ms")
+            frame = frame.set_index("dt").sort_index()
+        return frame
     except Exception:
         return pd.DataFrame()
 
-def _simple_bt(df_sig: pd.DataFrame, fee: float=0.0005):
-    if df_sig.empty or 'close' not in df_sig: return {'trades':0,'total_return_pct':0,'win_rate_pct':0,'max_drawdown_pct':0,'equity':None}
-    if 'buy_signal' not in df_sig or 'sell_signal' not in df_sig: return {'trades':0,'total_return_pct':0,'win_rate_pct':0,'max_drawdown_pct':0,'equity':None}
-    in_pos=False; entry=0.0; eq=1.0; equity=[]; trades=[]; peak=-1e9; max_dd=0.0
-    for ts,row in df_sig.iterrows():
-        price=row.get('close')
-        if price is None or np.isnan(price): continue
-        if (not in_pos) and bool(row.get('buy_signal')): in_pos=True; entry=float(price)
-        if in_pos and bool(row.get('sell_signal')):
-            gross=float(price)/entry; net=gross*(1-fee)*(1-fee); eq*=net; trades.append((entry,float(price),(net-1)*100)); in_pos=False
-        equity.append(eq)
-        if eq>peak: peak=eq
-        dd=(eq/peak -1)*100 if peak>0 else 0
-        if dd<max_dd: max_dd=dd
-    if in_pos: pass
-    if not equity:
-        return {'trades':0,'total_return_pct':0,'win_rate_pct':0,'max_drawdown_pct':0,'equity':None}
-    total_return_pct=(equity[-1]-1)*100
-    win_rate = (sum(1 for t in trades if t[2]>0)/len(trades)*100) if trades else 0
-    return {'trades':len(trades),'total_return_pct':total_return_pct,'win_rate_pct':win_rate,'max_drawdown_pct':max_dd,'equity':pd.Series(equity, index=df_sig.index[:len(equity)])}
+
+def _compute_account_equity() -> float | None:
+    if not api:
+        return None
+    try:
+        accounts = api.accounts()
+    except Exception:
+        return None
+    total = 0.0
+    markets: list[str] = []
+    balances: list[tuple[str, float]] = []
+    for account in accounts:
+        amount = float(account.get("balance") or 0.0) + float(account.get("locked") or 0.0)
+        currency = account.get("currency")
+        if currency == "KRW":
+            total += amount
+        elif currency:
+            balances.append((currency, amount))
+            markets.append(f"KRW-{currency}")
+    if markets:
+        try:
+            price_map = {
+                item["market"]: float(item.get("trade_price") or 0.0)
+                for item in api.tickers(markets)
+                if item.get("market")
+            }
+            for currency, amount in balances:
+                total += amount * price_map.get(f"KRW-{currency}", 0.0)
+        except Exception:
+            pass
+    return total
+
+
+def _resolve_day_start_equity(metrics: dict, trader: PaperTrader) -> float:
+    if metrics.get("day_start_equity"):
+        return float(metrics["day_start_equity"])
+    actual = _compute_account_equity()
+    if actual and actual > 0:
+        return actual
+    estimate = sum(position.cost for position in trader.positions.values()) + float(metrics.get("daily_buy") or 0.0)
+    return max(estimate, 1.0)
+
+
+def _current_signal(last_row: pd.Series) -> str:
+    if bool(last_row.get("buy_signal")):
+        return "BUY"
+    if bool(last_row.get("sell_signal")):
+        return "SELL"
+    return "WAIT"
+
 
 def _ensure_lock():
-    if 'LIVE_LOCK' not in st.session_state:
-        st.session_state['LIVE_LOCK']=threading.Lock()
+    if "LIVE_LOCK" not in st.session_state:
+        st.session_state["LIVE_LOCK"] = threading.Lock()
 
 
 def _scan_core(params: dict, last_state: dict) -> dict:
-    """순수 스캔 로직.
-    last_state: { market: { 'sig': str, 'entry': float|None } }
-    반환 snapshot dict.
-    """
-    rank=_markets_rank()
-    if rank.empty:
-        return {'table': pd.DataFrame(), 'detail': {}, 'last_sig': last_state, 'notify': []}
-    top_df=rank.head(int(params['topn'])).copy()
-    sim_mode = (os.getenv('UPBIT_LIVE') != '1')  # 환경변수 기반 시뮬 판단
-    sim_tag = "[SIM]" if sim_mode else ""
-    sim_rows=[]; detail_cache={}; notifier_msgs=[]
-    for _,r in top_df.iterrows():
-        mk=r['market']; candles=_candles(mk, params['interval'], int(params['count']))
-        if candles.empty:
-            sim_rows.append({'market':mk,'trades':0,'total_return_pct':0,'win_rate_pct':0,'max_drawdown_pct':0,'last_signal':'-','price':None,'error':'no_candles'})
+    ranked = _markets_rank()
+    if ranked.empty:
+        return {"table": pd.DataFrame(), "detail": {}, "last_sig": last_state, "notify": [], "trades": []}
+
+    trader = PaperTrader(params.get("_positions"))
+    metrics = ensure_daily_metrics(params.get("_metrics"), day=time.strftime("%Y-%m-%d"))
+    metrics["day_start_equity"] = _resolve_day_start_equity(metrics, trader)
+    risk_config = risk_config_from_dict(params.get("risk_limits"))
+    strategy_name = str(params.get("strategy_name", "research_trend"))
+    live_orders = bool(params.get("live_trading")) and os.getenv("UPBIT_LIVE") == "1"
+
+    result_rows: list[dict[str, object]] = []
+    detail_cache: dict[str, dict[str, object]] = {}
+    notify: list[str] = []
+    trade_events: list[dict[str, object]] = []
+    price_map: dict[str, float] = {}
+
+    for _, row in ranked.head(int(params["topn"])).iterrows():
+        market = row["market"]
+        raw = _candles(market, str(params["interval"]), int(params["count"]))
+        if raw.empty:
+            result_rows.append({"market": market, "last_signal": "WAIT", "error": "no_candles"})
             continue
+
         try:
-            raw=candles[['open','high','low','close','volume']]
-            indi = flux_indicator(raw, ltf_mult=float(params['ltf_mult']), ltf_length=int(params['ltf_len']), htf_mult=float(params['htf_mult']), htf_length=int(params['htf_len']), htf_rule=params['htf_rule']) if flux_indicator else pd.DataFrame()
-            df_all=raw.join(indi, how='left') if not indi.empty else raw
-            bt=_simple_bt(df_all, fee=float(params['fee']))
-            last_row=df_all.iloc[-1]
-            close_price=last_row.get('close')
-            # 시그널 판별
-            if bool(last_row.get('buy_signal')): cur_sig='BUY'
-            elif bool(last_row.get('sell_signal')): cur_sig='SELL'
-            else: cur_sig='-'
-            st_prev=last_state.get(mk, {'sig':'-','entry':None})
-            prev_sig=st_prev.get('sig','-'); entry_price=st_prev.get('entry')
-            notify_msg=None
-            if cur_sig=='BUY' and prev_sig!='BUY':
-                # 새 진입
-                try: price_txt=f"{float(close_price):.4f}" if close_price is not None else 'NA'
-                except Exception: price_txt=str(close_price)
-                notify_msg=f"[LIVE]{(' ' + sim_tag) if sim_tag else ''} {mk} BUY price={price_txt} ret={bt['total_return_pct']:.2f}%"
-                entry_price=float(close_price) if close_price is not None else None
-            elif cur_sig=='SELL' and prev_sig=='BUY':
-                # 청산: pnl 계산
-                try:
-                    if entry_price and close_price:
-                        pnl_pct=(float(close_price)/float(entry_price)-1)*100
-                    else:
-                        pnl_pct=None
-                except Exception:
-                    pnl_pct=None
-                try: price_txt=f"{float(close_price):.4f}" if close_price is not None else 'NA'
-                except Exception: price_txt=str(close_price)
-                if pnl_pct is not None:
-                    pnl_txt=("+" if pnl_pct>=0 else "")+f"{pnl_pct:.2f}%"
+            frame = build_strategy_frame(
+                raw[["open", "high", "low", "close", "volume"]],
+                strategy_name=strategy_name,
+                params=params,
+                flux_indicator=flux_indicator,
+            )
+        except Exception as exc:
+            result_rows.append({"market": market, "last_signal": "WAIT", "error": repr(exc)})
+            continue
+
+        bt = backtest_signal_frame(frame, fee=float(params["fee"]))
+        last_row = frame.iloc[-1]
+        signal = _current_signal(last_row)
+        previous_signal = (last_state.get(market) or {}).get("sig", "WAIT")
+        score = float(last_row.get("strategy_score", 0.0))
+        close_price = float(last_row["close"])
+        position = trader.get_position(market)
+        price_map[market] = close_price
+
+        if signal == "BUY" and previous_signal != "BUY":
+            decision = evaluate_entry(
+                config=risk_config,
+                metrics=metrics,
+                positions=trader.to_state(),
+                price_map=price_map,
+                market=market,
+                day_start_equity=float(metrics["day_start_equity"]),
+            )
+            if decision.allowed:
+                order_ok = True
+                order_suffix = ""
+                if live_orders:
+                    order_result = api.create_order(market, side="bid", ord_type="price", price=f"{int(decision.trade_cost)}", simulate=False)
+                    if order_result.get("error"):
+                        order_ok = False
+                        order_suffix = f" [LIVE_ERROR:{order_result.get('status_code', 'unknown')}]"
+                if order_ok:
+                    trade_event = trader.enter_long(
+                        market=market,
+                        price=close_price,
+                        cost=decision.trade_cost,
+                        strategy=strategy_name,
+                    )
+                    trade_events.append(trade_event)
+                    metrics["daily_buy"] = float(metrics.get("daily_buy") or 0.0) + decision.trade_cost
+                    notify.append(
+                        f"[{'LIVE' if live_orders else 'SIM'}] {market} BUY price={close_price:.4f} alloc={decision.trade_cost:.0f} score={score:.2f}{order_suffix}"
+                    )
                 else:
-                    pnl_txt='?'
-                ent_txt=f"{entry_price:.4f}" if entry_price else 'NA'
-                notify_msg=f"[LIVE]{(' ' + sim_tag) if sim_tag else ''} {mk} SELL price={price_txt} pnl={pnl_txt} (entry={ent_txt})"
-                # 청산 후 엔트리 초기화
-                entry_price=None
-            # 상태 저장
-            last_state[mk]={'sig':cur_sig,'entry': entry_price if cur_sig=='BUY' else None}
-            if notify_msg:
-                notifier_msgs.append(notify_msg)
-            sim_rows.append({'market':mk,'trades':bt['trades'],'total_return_pct':bt['total_return_pct'],'win_rate_pct':bt['win_rate_pct'],'max_drawdown_pct':bt['max_drawdown_pct'],'last_signal':cur_sig,'price':close_price})
-            detail_cache[mk]={'df':df_all,'bt':bt}
-        except Exception as e:
-            sim_rows.append({'market':mk,'trades':0,'total_return_pct':0,'win_rate_pct':0,'max_drawdown_pct':0,'last_signal':'-','price':None,'error':repr(e)})
-    res_df=pd.DataFrame(sim_rows)
-    if not res_df.empty:
-        res_df=res_df.sort_values('total_return_pct', ascending=False)
-    return {'table':res_df,'detail':detail_cache,'last_sig': last_state,'notify': notifier_msgs,'last_run': time.time()}
+                    signal = "WAIT"
+            else:
+                notify.append(f"[SIM] {market} BUY blocked: {decision.blocked_reason} price={close_price:.4f}")
+                signal = "WAIT"
+
+        elif signal == "SELL" and previous_signal == "BUY" and position is not None:
+            order_ok = True
+            order_suffix = ""
+            if live_orders:
+                order_result = api.create_order(
+                    market,
+                    side="ask",
+                    ord_type="market",
+                    volume=f"{position.qty:.8f}",
+                    simulate=False,
+                )
+                if order_result.get("error"):
+                    order_ok = False
+                    order_suffix = f" [LIVE_ERROR:{order_result.get('status_code', 'unknown')}]"
+            if order_ok:
+                trade_event = trader.exit_long(market=market, price=close_price, reason="signal")
+                if trade_event:
+                    trade_events.append(trade_event)
+                    metrics["realized_pnl"] = float(metrics.get("realized_pnl") or 0.0) + float(trade_event["pnl_value"])
+                    notify.append(
+                        f"[{'LIVE' if live_orders else 'SIM'}] {market} SELL price={close_price:.4f} pnl={float(trade_event['pnl_pct']):+.2f}%{order_suffix}"
+                    )
+            else:
+                signal = "BUY"
+
+        updated_position = trader.get_position(market)
+        last_state[market] = {
+            "sig": "BUY" if updated_position else signal,
+            "entry": updated_position.entry if updated_position else None,
+        }
+        detail_cache[market] = {"df": frame, "bt": bt}
+        result_rows.append(
+            {
+                "market": market,
+                "price": close_price,
+                "score": score,
+                "trades": int(bt["trades"]),
+                "return_pct": float(bt["total_return_pct"]),
+                "win_rate_pct": float(bt["win_rate_pct"]),
+                "max_drawdown_pct": float(bt["max_drawdown_pct"]),
+                "last_signal": "BUY" if updated_position else signal,
+                "position": "OPEN" if updated_position else "-",
+            }
+        )
+
+    positions_state = trader.to_state()
+    metrics["unrealized_pnl"] = total_unrealized_pnl(positions_state, price_map)
+    metrics["total_pnl"] = float(metrics.get("realized_pnl") or 0.0) + float(metrics["unrealized_pnl"])
+    table = pd.DataFrame(result_rows)
+    if not table.empty:
+        table = table.sort_values(["score", "return_pct"], ascending=False)
+    return {
+        "table": table,
+        "detail": detail_cache,
+        "last_sig": last_state,
+        "notify": notify,
+        "last_run": time.time(),
+        "_metrics": metrics,
+        "_positions": positions_state,
+        "trades": trade_events,
+    }
+
 
 def _scan(params: dict):
-    """메인 스레드용 스캔: session_state 업데이트."""
     _ensure_lock()
-    with st.session_state['LIVE_LOCK']:
-        if 'LIVE_LAST_SIG' not in st.session_state:
-            st.session_state['LIVE_LAST_SIG']={}
-        snapshot=_scan_core(params, st.session_state['LIVE_LAST_SIG'])
-        st.session_state['LIVE_LAST_SIG']=snapshot['last_sig']
-        st.session_state['LIVE_RESULTS']={'table':snapshot['table'],'detail':snapshot['detail']}
-        st.session_state['LIVE_LAST_RUN']=snapshot.get('last_run')
-        notifier=get_notifier()
-        if snapshot['notify'] and notifier and notifier.available():
-            for m in snapshot['notify'][:20]:
-                try: notifier.send_text(m)
-                except Exception: pass
+    with st.session_state["LIVE_LOCK"]:
+        snapshot = _scan_core(params, st.session_state.get("LIVE_LAST_SIG", {}))
+        st.session_state["LIVE_LAST_SIG"] = snapshot["last_sig"]
+        st.session_state["LIVE_RESULTS"] = {"table": snapshot["table"], "detail": snapshot["detail"]}
+        st.session_state["LIVE_LAST_RUN"] = snapshot.get("last_run")
+        st.session_state["LIVE_METRICS"] = snapshot.get("_metrics")
+        st.session_state["LIVE_POSITIONS"] = snapshot.get("_positions")
+        if snapshot.get("trades"):
+            st.session_state.setdefault("LIVE_TRADES", [])
+            st.session_state["LIVE_TRADES"].extend(snapshot["trades"])
+            st.session_state["LIVE_TRADES"] = st.session_state["LIVE_TRADES"][-500:]
+        notifier = get_notifier()
+        if notifier.available():
+            for message in snapshot["notify"][:10]:
+                try:
+                    notifier.send_text(message)
+                except Exception:
+                    pass
+
 
 class _Worker:
     def __init__(self):
         self.thread = None
-        self.stop_evt = threading.Event()
+        self.stop_event = threading.Event()
         self.lock = threading.Lock()
-        self.last_sig_state: dict = {}
-        self.snapshot = None
-        self.last_error = None
         self.params: dict = {}
+        self.last_signal_state: dict = {}
+        self.snapshot = None
+        self.metrics: dict = {}
+        self.positions: dict = {}
+        self.last_error: str | None = None
         self.interval = 30
 
     def update_params(self, params: dict):
         with self.lock:
-            self.params = (params or {}).copy()
+            self.params = dict(params or {})
 
-    def _get_params(self):
+    def _get_params(self) -> dict:
         with self.lock:
-            return self.params.copy()
+            return dict(self.params)
 
-    def start(self, interval: int, initial_params: dict):
+    def start(self, interval: int, params: dict):
         self.stop()
-        self.update_params(initial_params)
         self.interval = interval
-        self.stop_evt.clear()
+        self.update_params(params)
+        self.stop_event.clear()
 
         def loop():
-            while not self.stop_evt.is_set():
+            while not self.stop_event.is_set():
                 try:
                     params = self._get_params()
-                    snap = _scan_core(params, self.last_sig_state)
-                    notifier = get_notifier()
-                    if snap['notify'] and notifier and notifier.available():
-                        for m in snap['notify'][:20]:
-                            try:
-                                notifier.send_text(m)
-                            except Exception:
-                                pass
+                    params["_metrics"] = self.metrics
+                    params["_positions"] = self.positions
+                    snapshot = _scan_core(params, self.last_signal_state)
                     with self.lock:
-                        self.snapshot = {
-                            'table': snap['table'],
-                            'detail': snap['detail'],
-                            'last_run': snap.get('last_run')
-                        }
-                except Exception as e:
-                    self.last_error = repr(e)
-                self.stop_evt.wait(self.interval)
+                        self.metrics = snapshot.get("_metrics") or self.metrics
+                        self.positions = snapshot.get("_positions") or self.positions
+                        self.last_signal_state = snapshot.get("last_sig") or self.last_signal_state
+                        self.snapshot = snapshot
+                except Exception as exc:
+                    self.last_error = repr(exc)
+                self.stop_event.wait(self.interval)
 
         self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()
 
     def stop(self):
         if self.thread and self.thread.is_alive():
-            self.stop_evt.set()
+            self.stop_event.set()
             self.thread.join(timeout=0.5)
 
     def get_snapshot(self):
         with self.lock:
             return self.snapshot
 
-    def get_error(self):
-        return self.last_error
+
+def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
+    options = strategy_options(flux_indicator is not None)
+    current = st.session_state.get(f"{prefix}_strategy_name", options[0])
+    index = options.index(current) if current in options else 0
+    strategy_name = st.selectbox("Strategy", options, index=index, format_func=strategy_label, key=f"{prefix}_strategy_name")
+    params: dict[str, float | int | str] = {}
+    if strategy_name == "research_trend":
+        with st.expander("Research Trend Parameters", expanded=False):
+            row1 = st.columns(4)
+            params["fast_ema"] = row1[0].number_input("Fast EMA", 5, 100, 21, 1, key=f"{prefix}_fast_ema")
+            params["slow_ema"] = row1[1].number_input("Slow EMA", 10, 240, 55, 1, key=f"{prefix}_slow_ema")
+            params["breakout_window"] = row1[2].number_input("Breakout Window", 5, 120, 20, 1, key=f"{prefix}_breakout")
+            params["exit_window"] = row1[3].number_input("Exit Window", 3, 80, 10, 1, key=f"{prefix}_exit")
+            row2 = st.columns(4)
+            params["atr_window"] = row2[0].number_input("ATR Window", 5, 50, 14, 1, key=f"{prefix}_atr_window")
+            params["atr_mult"] = row2[1].number_input("ATR Mult", 1.0, 6.0, 2.5, 0.1, key=f"{prefix}_atr_mult")
+            params["adx_window"] = row2[2].number_input("ADX Window", 5, 50, 14, 1, key=f"{prefix}_adx_window")
+            params["adx_threshold"] = row2[3].number_input("ADX Threshold", 5.0, 40.0, 18.0, 0.5, key=f"{prefix}_adx_threshold")
+            row3 = st.columns(3)
+            params["momentum_window"] = row3[0].number_input("Momentum Window", 5, 80, 20, 1, key=f"{prefix}_momentum")
+            params["volume_window"] = row3[1].number_input("Volume Window", 5, 80, 20, 1, key=f"{prefix}_volume_window")
+            params["volume_threshold"] = row3[2].number_input("Volume Ratio", 0.1, 3.0, 0.9, 0.1, key=f"{prefix}_volume_threshold")
+    else:
+        with st.expander("Flux Parameters", expanded=False):
+            row = st.columns(5)
+            params["ltf_len"] = row[0].number_input("LTF Len", 5, 400, 20, 1, key=f"{prefix}_ltf_len")
+            params["ltf_mult"] = row[1].number_input("LTF Mult", 0.1, 10.0, 2.0, 0.1, key=f"{prefix}_ltf_mult")
+            params["htf_len"] = row[2].number_input("HTF Len", 5, 400, 20, 1, key=f"{prefix}_htf_len")
+            params["htf_mult"] = row[3].number_input("HTF Mult", 0.1, 10.0, 2.25, 0.1, key=f"{prefix}_htf_mult")
+            htf = row[4].selectbox("HTF Rule", ["30m", "60m", "120m", "240m", "1D"], index=1, key=f"{prefix}_htf_rule")
+            params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
+    return strategy_name, params
+
+
+def _render_chart(frame: pd.DataFrame, strategy_name: str, bt: dict[str, object]):
+    figure = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.64, 0.18, 0.18], vertical_spacing=0.03)
+    figure.add_trace(
+        go.Candlestick(
+            x=frame.index,
+            open=frame["open"],
+            high=frame["high"],
+            low=frame["low"],
+            close=frame["close"],
+            increasing_line_color="#22c55e",
+            decreasing_line_color="#f43f5e",
+            name="Price",
+        ),
+        row=1,
+        col=1,
+    )
+    if strategy_name == "research_trend":
+        for column, color in [("ema_fast", "#60a5fa"), ("ema_slow", "#f59e0b"), ("atr_stop", "#f97316")]:
+            if column in frame:
+                figure.add_trace(go.Scatter(x=frame.index, y=frame[column], name=column, line={"color": color, "width": 1.5}), row=1, col=1)
+        figure.add_trace(go.Scatter(x=frame.index, y=frame["adx"], name="ADX", line={"color": "#a78bfa"}), row=2, col=1)
+        figure.add_hline(y=18, line={"color": "rgba(255,255,255,0.16)", "dash": "dot"}, row=2, col=1)
+        figure.add_trace(go.Scatter(x=frame.index, y=frame["strategy_score"], name="Score", line={"color": "#2dd4bf"}), row=3, col=1)
+    else:
+        for column in ["ltf_upper", "ltf_lower", "ltf_basis", "htf_upper", "htf_lower"]:
+            if column in frame:
+                figure.add_trace(go.Scatter(x=frame.index, y=frame[column], name=column, line={"width": 1.2}), row=1, col=1)
+        figure.add_trace(go.Bar(x=frame.index, y=frame["volume"], name="Volume", marker_color="rgba(96,165,250,0.5)"), row=3, col=1)
+    for column, color in [("buy_signal", "#22c55e"), ("sell_signal", "#f43f5e")]:
+        if column in frame:
+            hits = frame[frame[column]]
+            if not hits.empty:
+                figure.add_trace(go.Scatter(x=hits.index, y=hits["close"], mode="markers", name=column, marker={"size": 11, "color": color, "line": {"color": "white", "width": 1}}), row=1, col=1)
+    equity = bt.get("equity")
+    if equity is not None:
+        figure.add_trace(go.Scatter(x=equity.index, y=equity.values, name="Equity", line={"color": "#f8fafc"}), row=2, col=1)
+    return apply_chart_theme(figure, height=840)
 
 
 def render_live():
-    st.header('라이브 뷰)')
+    page_intro(
+        "Live Desk",
+        "Refactored live simulation with guarded execution",
+        "The live desk now uses shared strategy, risk, and paper-trading modules. Real orders still stay behind both the environment gate and an explicit UI confirmation.",
+    )
     if not api:
-        st.error('API 초기화 안됨')
+        st.error("API is not initialized.")
         return
-    lc1,lc2,lc3,lc4,lc5=st.columns(5)
-    interval=lc1.selectbox('인터벌',['minute5','minute15','minute30','minute60'],index=0,key='live2_interval')
-    count=lc2.number_input('캔들수',50,1000,300,10,key='live2_count')
-    fee=lc3.number_input('수수료',0.0,0.01,0.0005,0.0001,format='%.4f',key='live2_fee')
-    topn=lc4.number_input('Top N',5,50,20,1,key='live2_topn')
-    auto=lc5.checkbox('자동',value=True,key='live2_auto')
-    with st.expander('지표 파라미터', expanded=False):
-        p1,p2,p3,p4,p5=st.columns(5)
-        ltf_len=p1.number_input('LTF Len',5,400,20,1,key='live2_ltf_len')
-        ltf_mult=p2.number_input('LTF Mult',0.1,10.0,2.0,0.1,key='live2_ltf_mult')
-        htf_len=p3.number_input('HTF Len',5,400,20,1,key='live2_htf_len')
-        htf_mult=p4.number_input('HTF Mult',0.1,10.0,2.25,0.1,key='live2_htf_mult')
-        htf_rule_disp=p5.selectbox('HTF 주기',['30m','60m','120m','240m','1D'], index=0, key='live2_htf_rule')
-        if htf_rule_disp.endswith('m'): htf_rule=htf_rule_disp.replace('m','T')
-        else: htf_rule='1D'
-    params={'interval':interval,'count':int(count),'ltf_len':int(ltf_len),'ltf_mult':float(ltf_mult),'htf_len':int(htf_len),'htf_mult':float(htf_mult),'htf_rule':htf_rule,'fee':float(fee),'topn':int(topn)}
-    prev=st.session_state.get('LIVE_PARAMS') or {}
-    changed=any(prev.get(k)!=v for k,v in params.items())
-    st.session_state['LIVE_PARAMS']=params
 
-    # ---- Step 1: 실거래 토글 & 확인 ----
-    with st.expander('실거래 설정', expanded=False):
-        c1,c2,c3=st.columns([1,1,2])
-        raw_enable = c1.checkbox('실거래 활성', value=st.session_state.get('LIVE_TRADING_RAW', False), key='live_trading_raw')
-        confirm_txt = c2.text_input('확인문자 (LIVE 입력)', value=st.session_state.get('LIVE_TRADING_CONFIRM',''), key='live_trading_confirm')
-        # 환경변수 UPBIT_LIVE=1 이어야 실제 주문 가능 (API 모드)
-        env_live = (os.getenv('UPBIT_LIVE')=='1')
-        active = bool(raw_enable and confirm_txt.strip().upper()=='LIVE' and env_live)
-        st.session_state['LIVE_TRADING'] = active
-        st.session_state['LIVE_TRADING_RAW'] = raw_enable
-        st.session_state['LIVE_TRADING_CONFIRM'] = confirm_txt
+    controls = st.columns([1, 1, 1, 1, 1])
+    interval = controls[0].selectbox("Interval", ["minute15", "minute30", "minute60", "minute240", "day"], index=1)
+    count = int(controls[1].number_input("Candles", 120, 1200, 360, 20))
+    topn = int(controls[2].number_input("Top Markets", 5, 60, 20, 1))
+    fee = float(controls[3].number_input("Fee", 0.0, 0.01, 0.0005, 0.0001, format="%.4f"))
+    auto = controls[4].checkbox("Auto sync", value=True)
+    strategy_name, strategy_params = _strategy_controls("live")
+
+    with st.expander("Live Trading Guard", expanded=False):
+        guard_cols = st.columns([1, 1, 1.2])
+        live_toggle = guard_cols[0].checkbox("Enable live orders", value=st.session_state.get("LIVE_TRADING_RAW", False))
+        confirm_text = guard_cols[1].text_input("Type LIVE", value=st.session_state.get("LIVE_TRADING_CONFIRM", ""))
+        env_live = os.getenv("UPBIT_LIVE") == "1"
+        live_trading = bool(env_live and live_toggle and confirm_text.strip().upper() == "LIVE")
+        st.session_state["LIVE_TRADING_RAW"] = live_toggle
+        st.session_state["LIVE_TRADING_CONFIRM"] = confirm_text
+        st.session_state["LIVE_TRADING"] = live_trading
         if not env_live:
-            st.info('환경변수 UPBIT_LIVE=1 이 아니므로 실제 주문은 전송되지 않고 SIM 모드입니다.')
-        elif raw_enable and confirm_txt.strip().upper()!='LIVE':
-            st.warning('확인문자를 LIVE 로 입력해야 활성됩니다.')
-        elif active:
-            st.success('실거래 활성화됨 (LIVE 모드)')
+            st.info("Environment gate is closed. Set UPBIT_LIVE=1 before any real order can be sent.")
+        elif live_toggle and confirm_text.strip().upper() != "LIVE":
+            st.warning("The confirmation word must be LIVE before execution is armed.")
+        elif live_trading:
+            st.success("Live order execution is armed.")
 
-    is_live_mode = (os.getenv('UPBIT_LIVE')=='1' and st.session_state.get('LIVE_TRADING'))
-    mode_badge = '🟢 LIVE' if is_live_mode else '🟡 SIM'
-    st.markdown(f"**모드:** {mode_badge}")
-    wkcol1,wkcol2,wkcol3=st.columns([1,1,2])
-    worker_interval=wkcol1.number_input('워커주기(초)',5,3600,30,1,key='live2_worker_interval')
-    start_btn=wkcol2.button('워커 시작' if not st.session_state.get('LIVE_WORKING') else '재시작', key='live2_start')
-    stop_btn=wkcol2.button('워커 정지', key='live2_stop')
-    if 'LIVE_WORKER' not in st.session_state:
-        st.session_state['LIVE_WORKER']=_Worker()
-    worker: _Worker = st.session_state['LIVE_WORKER']
-    if start_btn:
-        st.session_state['LIVE_WORKING']=True
-        worker.start(worker_interval, st.session_state.get('LIVE_PARAMS'))
-    if stop_btn:
-        st.session_state['LIVE_WORKING']=False
+    with st.expander("Risk Limits", expanded=False):
+        row1 = st.columns(3)
+        max_trade_krw = float(row1[0].number_input("Max trade KRW", 0, 10_000_000_000, 50000, 10000, format="%d"))
+        max_trade_pct = float(row1[1].number_input("Max trade %", 0.0, 100.0, 2.0, 0.5, format="%.1f"))
+        per_asset_max_pct = float(row1[2].number_input("Max asset %", 0.0, 100.0, 10.0, 0.5, format="%.1f"))
+        row2 = st.columns(3)
+        daily_buy_limit = float(row2[0].number_input("Daily buy KRW", 0, 10_000_000_000, 200000, 50000, format="%d"))
+        daily_loss_limit_krw = float(row2[1].number_input("Daily loss KRW", 0, 10_000_000_000, 30000, 10000, format="%d"))
+        daily_loss_limit_pct = float(row2[2].number_input("Daily loss %", 0.0, 100.0, 3.0, 0.5, format="%.1f"))
+        include_unrealized = st.checkbox("Include unrealized loss in daily stop", value=True)
+        risk_limits = {
+            "max_trade_krw": max_trade_krw,
+            "max_trade_pct": max_trade_pct,
+            "per_asset_max_pct": per_asset_max_pct,
+            "daily_buy_limit": daily_buy_limit,
+            "daily_loss_limit_krw": daily_loss_limit_krw,
+            "daily_loss_limit_pct": daily_loss_limit_pct,
+            "include_unrealized_loss": include_unrealized,
+        }
+
+    params = {
+        "interval": interval,
+        "count": count,
+        "topn": topn,
+        "fee": fee,
+        "strategy_name": strategy_name,
+        "risk_limits": risk_limits,
+        "live_trading": live_trading,
+        **strategy_params,
+    }
+    changed = params != (st.session_state.get("LIVE_PARAMS") or {})
+    st.session_state["LIVE_PARAMS"] = params
+
+    worker_cols = st.columns([1, 1, 1, 1.4])
+    worker_interval = int(worker_cols[0].number_input("Worker Seconds", 5, 3600, 30, 1))
+    start = worker_cols[1].button("Start Worker", use_container_width=True)
+    stop = worker_cols[2].button("Stop Worker", use_container_width=True)
+    worker_cols[3].markdown(f"**Mode:** {'LIVE' if live_trading else 'SIM'} / **Strategy:** `{strategy_label(strategy_name)}`")
+
+    if "LIVE_WORKER" not in st.session_state:
+        st.session_state["LIVE_WORKER"] = _Worker()
+    worker: _Worker = st.session_state["LIVE_WORKER"]
+    if start:
+        st.session_state["LIVE_WORKING"] = True
+        worker.start(worker_interval, params)
+    if stop:
+        st.session_state["LIVE_WORKING"] = False
         worker.stop()
-    if (changed and auto) and st.session_state.get('LIVE_WORKING'):
-        worker.update_params(st.session_state.get('LIVE_PARAMS'))
-    if (not st.session_state.get('LIVE_WORKING')) and (changed or 'LIVE_RESULTS' not in st.session_state):
+    if changed and auto and st.session_state.get("LIVE_WORKING"):
+        worker.update_params(params)
+    if (not st.session_state.get("LIVE_WORKING")) and (changed or "LIVE_RESULTS" not in st.session_state):
         _scan(params)
-    # 워커 스냅샷 반영 (백그라운드 -> 메인)
-    if st.session_state.get('LIVE_WORKING'):
-        snap=worker.get_snapshot()
-        if snap:
-            st.session_state['LIVE_RESULTS']= {'table':snap['table'],'detail':snap['detail']}
-            st.session_state['LIVE_LAST_RUN']= snap.get('last_run')
-    last_run=st.session_state.get('LIVE_LAST_RUN')
-    colm=st.columns([1,1,1])
-    from datetime import datetime
-    colm[0].metric('마지막 실행', datetime.fromtimestamp(last_run).strftime('%H:%M:%S') if last_run else '-')
-    colm[1].metric('워커', 'ON' if st.session_state.get('LIVE_WORKING') else 'OFF')
-    colm[2].metric('변경', 'Yes' if changed else 'No')
-    res=st.session_state.get('LIVE_RESULTS') or {}
-    tbl=res.get('table')
-    if tbl is not None and isinstance(tbl,pd.DataFrame) and not tbl.empty:
-        st.dataframe(tbl[['market','price','trades','total_return_pct','win_rate_pct','max_drawdown_pct','last_signal']], use_container_width=True, hide_index=True)
-        sel=st.selectbox('상세', tbl['market'].tolist(), key='live2_detail')
-        detail=res.get('detail') or {}
-        if sel in detail:
-            det=detail[sel]; det_df=det['df']; bt=det['bt']
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            fig=make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75,0.25], vertical_spacing=0.02)
-            if {'open','high','low','close'}.issubset(det_df.columns):
-                fig.add_trace(go.Candlestick(x=det_df.index, open=det_df['open'], high=det_df['high'], low=det_df['low'], close=det_df['close'], increasing_line_color='red', decreasing_line_color='blue', name='Price'), row=1,col=1)
-            else:
-                fig.add_trace(go.Scatter(x=det_df.index, y=det_df['close'], name='close'), row=1,col=1)
-            for name,color in [('ltf_upper','rgba(255,0,0,0.6)'),('ltf_lower','rgba(0,120,255,0.6)'),('ltf_basis','rgba(200,200,200,0.6)')]:
-                if name in det_df: fig.add_trace(go.Scatter(x=det_df.index, y=det_df[name], name=name), row=1,col=1)
-            for name,color in [('htf_upper','rgba(255,140,0,0.9)'),('htf_lower','rgba(0,200,255,0.9)')]:
-                if name in det_df: fig.add_trace(go.Scatter(x=det_df.index, y=det_df[name], name=name, line=dict(dash='dash')), row=1,col=1)
-            for col,color,symbol in [('buy_signal','lime','triangle-up'),('sell_signal','magenta','triangle-down')]:
-                if col in det_df:
-                    hits=det_df[det_df[col]]
-                    if not hits.empty:
-                        fig.add_trace(go.Scatter(x=hits.index, y=hits['close'], mode='markers', name=col, marker=dict(symbol=symbol,size=10,color=color,line=dict(color='black',width=1))), row=1,col=1)
-            eq=bt.get('equity') if isinstance(bt,dict) else None
-            if eq is not None:
-                fig.add_trace(go.Scatter(x=eq.index, y=eq.values, name='equity', line=dict(color='orange')), row=2,col=1)
-            fig.update_layout(margin=dict(l=10,r=10,t=40,b=20), height=620, xaxis_rangeslider_visible=False, legend_orientation='h')
-            st.plotly_chart(fig, use_container_width=True)
+    if st.session_state.get("LIVE_WORKING"):
+        snapshot = worker.get_snapshot()
+        if snapshot:
+            st.session_state["LIVE_RESULTS"] = {"table": snapshot["table"], "detail": snapshot["detail"]}
+            st.session_state["LIVE_LAST_RUN"] = snapshot.get("last_run")
+            st.session_state["LIVE_METRICS"] = snapshot.get("_metrics")
+            st.session_state["LIVE_POSITIONS"] = snapshot.get("_positions")
+            if snapshot.get("trades"):
+                st.session_state.setdefault("LIVE_TRADES", [])
+                st.session_state["LIVE_TRADES"].extend(snapshot.get("trades"))
+                st.session_state["LIVE_TRADES"] = st.session_state["LIVE_TRADES"][-500:]
+
+    metrics = st.session_state.get("LIVE_METRICS") or {}
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("Day", metrics.get("day_date", "-"))
+    metric_cols[1].metric("Daily Buy", fmt_full_number(metrics.get("daily_buy"), 0))
+    metric_cols[2].metric("Realized", fmt_full_number(metrics.get("realized_pnl"), 0))
+    metric_cols[3].metric("Unrealized", fmt_full_number(metrics.get("unrealized_pnl"), 0))
+    metric_cols[4].metric("Total PnL", fmt_full_number(metrics.get("total_pnl"), 0))
+    metric_cols[5].metric("Worker", "ON" if st.session_state.get("LIVE_WORKING") else "OFF")
+
+    result = st.session_state.get("LIVE_RESULTS") or {}
+    table = result.get("table")
+    if table is not None and isinstance(table, pd.DataFrame) and not table.empty:
+        st.dataframe(table[["market", "price", "score", "trades", "return_pct", "win_rate_pct", "max_drawdown_pct", "last_signal", "position"]], use_container_width=True, hide_index=True)
+        selected_market = st.selectbox("Detail Market", table["market"].tolist(), key="live_detail_market")
+        detail = result.get("detail") or {}
+        if selected_market in detail:
+            st.plotly_chart(_render_chart(detail[selected_market]["df"], strategy_name, detail[selected_market]["bt"]), use_container_width=True)
     else:
-        st.info('결과 없음(실행 필요)')
+        st.info("Run the live desk once to build a leaderboard.")
+
+    positions = st.session_state.get("LIVE_POSITIONS") or {}
+    if positions:
+        position_rows = []
+        market_price_map = {row["market"]: row["price"] for row in table.to_dict("records")} if table is not None and not table.empty else {}
+        for market, raw in positions.items():
+            current_price = market_price_map.get(market)
+            entry = float(raw.get("entry") or 0.0)
+            qty = float(raw.get("qty") or 0.0)
+            pnl_value = ((float(current_price) - entry) * qty) if current_price is not None else None
+            pnl_pct = (((float(current_price) / entry) - 1.0) * 100) if current_price is not None and entry else None
+            position_rows.append({"market": market, "qty": qty, "entry": entry, "current_price": current_price, "pnl_value": pnl_value, "pnl_pct": pnl_pct})
+        st.subheader("Open Positions")
+        st.dataframe(pd.DataFrame(position_rows), use_container_width=True, hide_index=True)
+
+    st.session_state.setdefault("LIVE_TRADES", [])
+    with st.expander("Trade Log", expanded=False):
+        if st.button("Clear Log"):
+            st.session_state["LIVE_TRADES"] = []
+        logs = st.session_state.get("LIVE_TRADES") or []
+        if logs:
+            log_frame = pd.DataFrame(logs).sort_values("ts").tail(200)
+            log_frame["time"] = pd.to_datetime(log_frame["ts"], unit="s").dt.strftime("%H:%M:%S")
+            preferred = ["time", "market", "side", "price", "qty", "cost", "entry", "pnl_value", "pnl_pct", "reason", "strategy"]
+            st.dataframe(log_frame[[column for column in preferred if column in log_frame.columns]], use_container_width=True, hide_index=True)
+        else:
+            st.caption("No trades yet.")
