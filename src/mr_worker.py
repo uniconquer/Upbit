@@ -12,8 +12,21 @@ import pandas as pd
 from dotenv import load_dotenv
 
 try:
+    from exchange_state import sync_exchange_state
     from execution import build_pending_order, resolve_submitted_order
     from notifier import get_notifier
+    from notification_text import (
+        blocked_max_open_message,
+        blocked_risk_message,
+        buy_filled_message,
+        lookup_failed_message,
+        order_cancelled_message,
+        order_failed_message,
+        order_no_fill_message,
+        order_pending_message,
+        sell_filled_message,
+        start_message,
+    )
     from paper_trader import PaperTrader
     from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
     from runtime_store import load_runtime_state, save_runtime_state
@@ -21,8 +34,21 @@ try:
     from strategy_engine import build_strategy_frame
     from upbit_api import UpbitAPI
 except ImportError:
+    from src.exchange_state import sync_exchange_state
     from src.execution import build_pending_order, resolve_submitted_order
     from src.notifier import get_notifier
+    from src.notification_text import (
+        blocked_max_open_message,
+        blocked_risk_message,
+        buy_filled_message,
+        lookup_failed_message,
+        order_cancelled_message,
+        order_failed_message,
+        order_no_fill_message,
+        order_pending_message,
+        sell_filled_message,
+        start_message,
+    )
     from src.paper_trader import PaperTrader
     from src.risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
     from src.runtime_store import load_runtime_state, save_runtime_state
@@ -168,6 +194,8 @@ class MRMonitor:
         self.trade_log: list[dict[str, Any]] = []
         self.pending_orders: dict[str, dict[str, Any]] = {}
         self._last_fetch: dict[str, float] = {}
+        self._exchange_synced = False
+        self._next_exchange_sync_at = 0.0
         self._hydrate_state()
 
     def _mode_label(self) -> str:
@@ -251,6 +279,29 @@ class MRMonitor:
             return
         save_runtime_state(self.state_name, self._runtime_snapshot())
 
+    def _sync_with_exchange(self) -> None:
+        if not self.live_orders or self._exchange_synced:
+            return
+        now = time.time()
+        if now < self._next_exchange_sync_at:
+            return
+        result = sync_exchange_state(
+            self.api,
+            strategy_name=self.strategy_name,
+            existing_positions=self.trader.to_state(),
+            existing_pending_orders=self.pending_orders,
+            existing_signal_state=self.last_signal_state,
+        )
+        self.trader = PaperTrader(result.get("positions"))
+        self.pending_orders = dict(result.get("pending_orders") or {})
+        self.last_signal_state = dict(result.get("last_signal_state") or {})
+        for message in result.get("notifications") or []:
+            self._notify(message)
+        self._exchange_synced = bool(result.get("synced"))
+        self._next_exchange_sync_at = 0.0 if self._exchange_synced else (now + 60.0)
+        if self._exchange_synced:
+            self._save_state()
+
     def _place_order(
         self,
         *,
@@ -290,7 +341,7 @@ class MRMonitor:
         self.trade_log.append(event)
         self.trade_log = self.trade_log[-500:]
 
-    def _finalize_entry(self, market: str, score: float, fill: dict[str, Any]) -> None:
+    def _finalize_entry(self, market: str, score: float | None, fill: dict[str, Any]) -> None:
         event = self.trader.enter_long(
             market=market,
             price=float(fill["price"]),
@@ -303,7 +354,13 @@ class MRMonitor:
         self.last_signal_state[market] = {"sig": "BUY", "entry": float(event["price"])}
         self._record_trade(event)
         self._notify(
-            f"[{self._mode_label()}] {market} BUY price={float(event['price']):.4f} alloc={float(event['cost']):.0f} score={score:.2f}"
+            buy_filled_message(
+                self._mode_label(),
+                market=market,
+                price=float(event["price"]),
+                alloc=float(event["cost"]),
+                score=score,
+            )
         )
 
     def _finalize_exit(self, market: str, fill: dict[str, Any], reason: str) -> None:
@@ -318,9 +375,7 @@ class MRMonitor:
         self.metrics["realized_pnl"] = float(self.metrics.get("realized_pnl") or 0.0) + float(event["pnl_value"])
         self.last_signal_state[market] = {"sig": "SELL", "entry": None}
         self._record_trade(event)
-        self._notify(
-            f"[{self._mode_label()}] {market} SELL price={float(event['price']):.4f} pnl={float(event['pnl_pct']):+.2f}%"
-        )
+        self._notify(sell_filled_message(self._mode_label(), market=market, price=float(event["price"]), pnl_pct=float(event["pnl_pct"])))
 
     def _reconcile_pending_orders(self) -> None:
         if not self.live_orders or not self.pending_orders:
@@ -349,24 +404,24 @@ class MRMonitor:
             self.pending_orders.pop(market, None)
             changed = True
             if status == "cancelled":
-                self._notify(f"[LIVE] {market} {side.upper()} order cancelled before full fill")
+                self._notify(order_cancelled_message("LIVE", market=market, side=side))
                 if side == "bid":
                     self.last_signal_state[market] = {"sig": "WAIT", "entry": None}
                 continue
             if status == "error":
-                self._notify(f"[LIVE] {market} {side.upper()} lookup failed: {resolution.get('error')}")
+                self._notify(lookup_failed_message("LIVE", market=market, side=side, error=resolution.get("error")))
                 continue
             if side == "bid":
                 if float(fill.get("qty") or 0.0) <= 0 or float(fill.get("cost") or 0.0) <= 0:
-                    self._notify(f"[LIVE] {market} BUY resolved without executed volume")
+                    self._notify(order_no_fill_message("LIVE", market=market, side="buy"))
                     self.last_signal_state[market] = {"sig": "WAIT", "entry": None}
                     continue
-                self._finalize_entry(market, 0.0, fill)
+                self._finalize_entry(market, None, fill)
             elif side == "ask":
                 if not self.trader.has_position(market):
                     continue
                 if float(fill.get("qty") or 0.0) <= 0:
-                    self._notify(f"[LIVE] {market} SELL resolved without executed volume")
+                    self._notify(order_no_fill_message("LIVE", market=market, side="sell"))
                     continue
                 self._finalize_exit(market, fill, str(pending.get("reason") or "signal"))
         if changed:
@@ -374,7 +429,7 @@ class MRMonitor:
 
     def _handle_entry(self, market: str, close_price: float, score: float) -> None:
         if len(self.trader.positions) >= self.max_open:
-            self._notify(f"[{self._mode_label()}] {market} BUY blocked: max_open={self.max_open}")
+            self._notify(blocked_max_open_message(self._mode_label(), market=market, max_open=self.max_open))
             return
         decision = evaluate_entry(
             config=self.risk_config,
@@ -385,7 +440,7 @@ class MRMonitor:
             day_start_equity=float(self.metrics.get("day_start_equity") or 0.0),
         )
         if not decision.allowed:
-            self._notify(f"[{self._mode_label()}] {market} BUY blocked: {decision.blocked_reason} price={close_price:.4f}")
+            self._notify(blocked_risk_message(self._mode_label(), market=market, reason=decision.blocked_reason, price=close_price))
             return
         order_result = self._place_order(market=market, side="bid", ord_type="price", price=f"{int(decision.trade_cost)}")
         resolution = resolve_submitted_order(
@@ -397,10 +452,10 @@ class MRMonitor:
             timeout_seconds=self.reconcile_timeout_seconds,
         )
         if resolution.get("status") == "error":
-            self._notify(f"[{self._mode_label()}] {market} BUY failed: {resolution.get('error')}")
+            self._notify(order_failed_message(self._mode_label(), market=market, side="buy", error=resolution.get("error")))
             return
         if resolution.get("status") == "cancelled":
-            self._notify(f"[{self._mode_label()}] {market} BUY cancelled before fill")
+            self._notify(order_cancelled_message(self._mode_label(), market=market, side="buy"))
             return
         fill = dict(resolution.get("fill") or {})
         if resolution.get("status") == "pending" and self.live_orders:
@@ -413,11 +468,11 @@ class MRMonitor:
                 requested_cost=decision.trade_cost,
             )
             self.last_signal_state[market] = {"sig": "BUY_PENDING", "entry": None}
-            self._notify(f"[LIVE] {market} BUY submitted and waiting for fill")
+            self._notify(order_pending_message("LIVE", market=market, side="buy"))
             self._save_state()
             return
         if float(fill.get("qty") or 0.0) <= 0 or float(fill.get("cost") or 0.0) <= 0:
-            self._notify(f"[{self._mode_label()}] {market} BUY returned no fill")
+            self._notify(order_no_fill_message(self._mode_label(), market=market, side="buy"))
             return
         self._finalize_entry(market, score, fill)
 
@@ -440,10 +495,10 @@ class MRMonitor:
             timeout_seconds=self.reconcile_timeout_seconds,
         )
         if resolution.get("status") == "error":
-            self._notify(f"[{self._mode_label()}] {market} SELL failed: {resolution.get('error')}")
+            self._notify(order_failed_message(self._mode_label(), market=market, side="sell", error=resolution.get("error")))
             return
         if resolution.get("status") == "cancelled":
-            self._notify(f"[{self._mode_label()}] {market} SELL cancelled before fill")
+            self._notify(order_cancelled_message(self._mode_label(), market=market, side="sell"))
             return
         fill = dict(resolution.get("fill") or {})
         if resolution.get("status") == "pending" and self.live_orders:
@@ -457,11 +512,11 @@ class MRMonitor:
                 reason="signal",
             )
             self.last_signal_state[market] = {"sig": "SELL_PENDING", "entry": position.entry}
-            self._notify(f"[LIVE] {market} SELL submitted and waiting for fill")
+            self._notify(order_pending_message("LIVE", market=market, side="sell"))
             self._save_state()
             return
         if float(fill.get("qty") or 0.0) <= 0:
-            self._notify(f"[{self._mode_label()}] {market} SELL returned no fill")
+            self._notify(order_no_fill_message(self._mode_label(), market=market, side="sell"))
             return
         self._finalize_exit(market, fill, "signal")
 
@@ -480,9 +535,10 @@ class MRMonitor:
 
         if pending:
             pending_side = str(pending.get("side") or "").lower()
+            pending_signal = "BUY_PENDING" if pending_side == "bid" else "SELL_PENDING"
             updated_position = self.trader.get_position(market)
             self.last_signal_state[market] = {
-                "sig": f"{pending_side.upper()}_PENDING",
+                "sig": pending_signal,
                 "entry": updated_position.entry if updated_position else None,
             }
             bt = backtest_signal_frame(frame, fee=self.fee)
@@ -494,7 +550,7 @@ class MRMonitor:
                 "return_pct": float(bt["total_return_pct"]),
                 "win_rate_pct": float(bt["win_rate_pct"]),
                 "max_drawdown_pct": float(bt["max_drawdown_pct"]),
-                "last_signal": f"{pending_side.upper()}_PENDING",
+                "last_signal": pending_signal,
                 "position": "OPEN" if updated_position else "PENDING",
             }
 
@@ -524,6 +580,7 @@ class MRMonitor:
     def run_cycle(self, markets: list[str]) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []
         trades_before = len(self.trade_log)
+        self._sync_with_exchange()
         self._reconcile_pending_orders()
         for market in markets:
             try:
@@ -552,7 +609,13 @@ class MRMonitor:
 
     def loop(self, markets: list[str], *, loop_seconds: int = 120, cycles: int = 0) -> None:
         self._notify(
-            f"[START][{self._mode_label()}] strategy={self.strategy_name} interval={self.interval} markets={len(markets)} max_open={self.max_open}"
+            start_message(
+                self._mode_label(),
+                strategy_name=self.strategy_name,
+                interval=self.interval,
+                markets=len(markets),
+                max_open=self.max_open,
+            )
         )
         cycle_index = 0
         while True:

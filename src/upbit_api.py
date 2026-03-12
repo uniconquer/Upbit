@@ -127,7 +127,7 @@ class UpbitAPI:
             "nonce": str(uuid.uuid4()),
         }
         if query:
-            q = urlencode(query)
+            q = urlencode(query, doseq=True)
             query_hash = hashlib.sha512(q.encode()).hexdigest()
             payload.update({
                 "query_hash": query_hash,
@@ -166,6 +166,27 @@ class UpbitAPI:
         r.raise_for_status()
         return r.json()
 
+    def open_orders(
+        self,
+        market: Optional[str] = None,
+        *,
+        states: Optional[list[str]] = None,
+        limit: int = 100,
+        order_by: str = "desc",
+    ) -> list[Dict[str, Any]]:
+        query: Dict[str, Any] = {
+            "limit": max(1, min(int(limit), 100)),
+            "order_by": order_by,
+        }
+        if market:
+            query["market"] = market
+        if states:
+            query["states[]"] = states
+        headers = self._auth_headers(query)
+        r = self.session.get(f"{UPBIT_API_BASE}/orders/open", params=query, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json()
+
     def create_order(self, market: str, side: str, ord_type: str,
                      volume: Optional[str] = None, price: Optional[str] = None,
                      simulate: bool = False) -> Dict[str, Any]:
@@ -200,7 +221,7 @@ class UpbitAPI:
         if price is not None:
             query['price'] = price
         headers = self._auth_headers(query)
-        r = self.session.post(f"{UPBIT_API_BASE}/orders", params=query, headers=headers, timeout=10)
+        r = self.session.post(f"{UPBIT_API_BASE}/orders", json=query, headers=headers, timeout=10)
         if r.status_code >= 400:
             try:
                 return {'error': r.json(), 'status_code': r.status_code}

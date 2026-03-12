@@ -38,6 +38,9 @@ class FakeAPI:
     def accounts(self):
         return []
 
+    def open_orders(self, market=None, states=None, limit=100, order_by="desc"):
+        return []
+
 
 class PendingLiveAPI(FakeAPI):
     def __init__(self):
@@ -68,6 +71,29 @@ class PendingLiveAPI(FakeAPI):
 class LookupFailureAPI(FakeAPI):
     def get_order(self, uuid=None, identifier=None):
         raise RuntimeError("lookup failed")
+
+
+class ExchangeSyncAPI(FakeAPI):
+    def accounts(self):
+        return [
+            {"currency": "KRW", "balance": "500000", "locked": "0"},
+            {"currency": "BTC", "balance": "0.05000000", "locked": "0.01000000", "avg_buy_price": "100.0"},
+        ]
+
+    def open_orders(self, market=None, states=None, limit=100, order_by="desc"):
+        return [
+            {
+                "uuid": "ask-1",
+                "market": "KRW-BTC",
+                "side": "ask",
+                "ord_type": "limit",
+                "state": "wait",
+                "price": "110.0",
+                "volume": "0.01000000",
+                "remaining_volume": "0.01000000",
+                "locked": "0.01000000",
+            }
+        ]
 
 
 def _signal_frame(*, buy: bool = False, sell: bool = False, close: float = 100.0) -> pd.DataFrame:
@@ -201,3 +227,24 @@ def test_live_lookup_failure_stays_pending():
         timeout_seconds=0.01,
     )
     assert resolution["status"] == "pending"
+
+
+def test_live_monitor_syncs_positions_and_open_orders(monkeypatch):
+    monkeypatch.setenv("UPBIT_LIVE", "1")
+    api = ExchangeSyncAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        risk_limits={"max_trade_krw": 10000},
+        max_open=2,
+        min_fetch_seconds=0,
+        per_request_sleep=0,
+        live_orders=True,
+    )
+
+    summary = monitor.run_cycle([])
+
+    assert summary["open"] == 1
+    assert "KRW-BTC" in monitor.pending_orders
+    assert monitor.trader.has_position("KRW-BTC")
+    assert monitor.last_signal_state["KRW-BTC"]["sig"] == "SELL_PENDING"
