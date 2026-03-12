@@ -297,11 +297,12 @@ def render_backtest():
 
     with right:
         st.subheader("Chart Desk")
-        control_col1, control_col2, control_col3, control_col4 = st.columns([1, 1, 1.2, 1])
+        control_col1, control_col2, control_col3, control_col4, control_col5 = st.columns([1, 1, 1.1, 1.1, 1])
         interval = control_col1.selectbox("Interval", ["minute15", "minute30", "minute60", "minute240", "day"], index=2)
         count = int(control_col2.number_input("Candles", 120, 1200, 360, 20))
         fee = float(control_col3.number_input("Fee", 0.0, 0.01, 0.0005, 0.0001, format="%.4f"))
-        auto_run = control_col4.checkbox("Auto refresh", value=True)
+        slippage_bps = float(control_col4.number_input("Slippage (bps)", 0.0, 100.0, 3.0, 0.5))
+        auto_run = control_col5.checkbox("Auto refresh", value=True)
         strategy_name, strategy_params = _strategy_controls()
         run_now = st.button("Run Analysis", use_container_width=True)
 
@@ -315,6 +316,7 @@ def render_backtest():
             "interval": interval,
             "count": count,
             "fee": fee,
+            "slippage_bps": slippage_bps,
             "strategy_name": strategy_name,
             "strategy_params": strategy_params,
         }
@@ -341,7 +343,7 @@ def render_backtest():
             st.info("Run an analysis to render the chart.")
             return
 
-        bt_result = backtest_signal_frame(frame, fee=fee)
+        bt_result = backtest_signal_frame(frame, fee=fee, slippage_bps=slippage_bps)
         last_row = frame.iloc[-1]
         metric_cols = st.columns(5)
         metric_cols[0].metric("Strategy", strategy_label(strategy_name))

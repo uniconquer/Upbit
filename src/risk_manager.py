@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+try:
+    from trading_costs import cost_model_from_values
+except ImportError:
+    from src.trading_costs import cost_model_from_values
+
 
 @dataclass(slots=True)
 class RiskConfig:
@@ -73,15 +78,19 @@ def ensure_daily_metrics(
 def total_unrealized_pnl(
     positions: Mapping[str, Mapping[str, Any]],
     price_map: Mapping[str, float],
+    *,
+    fee_rate: float = 0.0,
+    slippage_bps: float = 0.0,
 ) -> float:
+    cost_model = cost_model_from_values(fee_rate=fee_rate, slippage_bps=slippage_bps)
     total = 0.0
     for market, position in positions.items():
         price = price_map.get(market)
         if price is None:
             continue
-        entry = _to_float(position.get("entry"))
         qty = _to_float(position.get("qty"))
-        total += (float(price) - entry) * qty
+        cost = _to_float(position.get("cost"))
+        total += cost_model.unrealized_pnl(entry_cost=cost, qty=qty, market_price=float(price))
     return total
 
 
@@ -91,9 +100,20 @@ def effective_loss(
     price_map: Mapping[str, float],
     *,
     include_unrealized_loss: bool,
+    fee_rate: float = 0.0,
+    slippage_bps: float = 0.0,
 ) -> float:
     realized = _to_float(metrics.get("realized_pnl"))
-    unrealized = total_unrealized_pnl(positions, price_map) if include_unrealized_loss else 0.0
+    unrealized = (
+        total_unrealized_pnl(
+            positions,
+            price_map,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+        )
+        if include_unrealized_loss
+        else 0.0
+    )
     return realized + unrealized
 
 
@@ -113,12 +133,16 @@ def evaluate_entry(
     price_map: Mapping[str, float],
     market: str,
     day_start_equity: float | None,
+    fee_rate: float = 0.0,
+    slippage_bps: float = 0.0,
 ) -> EntryDecision:
     effective = effective_loss(
         metrics,
         positions,
         price_map,
         include_unrealized_loss=config.include_unrealized_loss,
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
     )
     if config.daily_loss_limit_krw > 0 and effective <= -config.daily_loss_limit_krw:
         return EntryDecision(False, blocked_reason=f"daily loss {config.daily_loss_limit_krw:g} KRW")

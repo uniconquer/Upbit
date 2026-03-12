@@ -6,6 +6,11 @@ from dataclasses import asdict, dataclass
 import time
 from typing import Any, Mapping
 
+try:
+    from trading_costs import TradingCostModel, cost_model_from_values
+except ImportError:
+    from src.trading_costs import TradingCostModel, cost_model_from_values
+
 
 @dataclass(slots=True)
 class PaperPosition:
@@ -69,15 +74,20 @@ class PaperTrader:
         price: float,
         cost: float,
         strategy: str,
+        fee_rate: float = 0.0,
+        slippage_bps: float = 0.0,
         qty: float | None = None,
         order_uuid: str | None = None,
         timestamp: float | None = None,
     ) -> dict[str, Any]:
-        resolved_qty = float(qty) if qty is not None else ((float(cost) / float(price)) if price else 0.0)
+        model: TradingCostModel = cost_model_from_values(fee_rate=fee_rate, slippage_bps=slippage_bps)
+        simulated_fill = model.simulate_entry(price=float(price), budget=float(cost))
+        effective_price = float(price) if qty is not None else simulated_fill["price"]
+        resolved_qty = float(qty) if qty is not None else simulated_fill["qty"]
         position = PaperPosition(
             market=market,
             qty=resolved_qty,
-            entry=float(price),
+            entry=effective_price,
             cost=float(cost),
             opened_at=float(timestamp or time.time()),
             strategy=strategy,
@@ -91,6 +101,7 @@ class PaperTrader:
             "price": position.entry,
             "qty": position.qty,
             "cost": position.cost,
+            "fee_paid": simulated_fill["fee_paid"] if qty is None else 0.0,
             "strategy": strategy,
             "order_uuid": order_uuid,
         }
@@ -101,6 +112,8 @@ class PaperTrader:
         market: str,
         price: float,
         reason: str,
+        fee_rate: float = 0.0,
+        slippage_bps: float = 0.0,
         order_uuid: str | None = None,
         timestamp: float | None = None,
     ) -> dict[str, Any] | None:
@@ -109,18 +122,20 @@ class PaperTrader:
             return None
 
         trade_ts = float(timestamp or time.time())
-        pnl_value = (float(price) - position.entry) * position.qty
-        pnl_pct = ((float(price) / position.entry) - 1.0) * 100 if position.entry else 0.0
+        model: TradingCostModel = cost_model_from_values(fee_rate=fee_rate, slippage_bps=slippage_bps)
+        exit_fill = model.simulate_exit(price=float(price), qty=position.qty, cost_basis=position.cost)
         return {
             "ts": trade_ts,
             "market": market,
             "side": "SELL",
-            "price": float(price),
+            "price": exit_fill["price"],
             "qty": position.qty,
             "entry": position.entry,
             "cost": position.cost,
-            "pnl_value": pnl_value,
-            "pnl_pct": pnl_pct,
+            "fee_paid": exit_fill["fee_paid"],
+            "net_proceeds": exit_fill["net_proceeds"],
+            "pnl_value": exit_fill["pnl_value"],
+            "pnl_pct": exit_fill["pnl_pct"],
             "reason": reason,
             "strategy": position.strategy,
             "order_uuid": order_uuid,

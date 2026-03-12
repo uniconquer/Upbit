@@ -14,11 +14,15 @@ from dotenv import load_dotenv
 try:
     from exchange_state import sync_exchange_state
     from execution import build_pending_order, resolve_submitted_order
+    from kill_switch import effective_kill_switch
     from notifier import get_notifier
     from notification_text import (
         blocked_max_open_message,
         blocked_risk_message,
         buy_filled_message,
+        kill_switch_block_message,
+        kill_switch_disabled_message,
+        kill_switch_enabled_message,
         lookup_failed_message,
         order_cancelled_message,
         order_failed_message,
@@ -32,15 +36,20 @@ try:
     from runtime_store import load_runtime_state, save_runtime_state
     from strategy import backtest_signal_frame
     from strategy_engine import build_strategy_frame
+    from trading_costs import TradingCostModel, cost_model_from_values
     from upbit_api import UpbitAPI
 except ImportError:
     from src.exchange_state import sync_exchange_state
     from src.execution import build_pending_order, resolve_submitted_order
+    from src.kill_switch import effective_kill_switch
     from src.notifier import get_notifier
     from src.notification_text import (
         blocked_max_open_message,
         blocked_risk_message,
         buy_filled_message,
+        kill_switch_block_message,
+        kill_switch_disabled_message,
+        kill_switch_enabled_message,
         lookup_failed_message,
         order_cancelled_message,
         order_failed_message,
@@ -54,6 +63,7 @@ except ImportError:
     from src.runtime_store import load_runtime_state, save_runtime_state
     from src.strategy import backtest_signal_frame
     from src.strategy_engine import build_strategy_frame
+    from src.trading_costs import TradingCostModel, cost_model_from_values
     from src.upbit_api import UpbitAPI
 
 try:
@@ -172,6 +182,8 @@ class MRMonitor:
         per_request_sleep: float = 0.12,
         state_name: str | None = None,
         reconcile_timeout_seconds: float = 3.0,
+        cost_model: TradingCostModel | None = None,
+        kill_switch_name: str = "trade-kill-switch",
     ):
         self.api = api
         self.interval = interval
@@ -186,6 +198,8 @@ class MRMonitor:
         self.per_request_sleep = per_request_sleep
         self.state_name = state_name
         self.reconcile_timeout_seconds = reconcile_timeout_seconds
+        self.cost_model = cost_model or cost_model_from_values()
+        self.kill_switch_name = kill_switch_name
         self.notifier = get_notifier()
         self.trader = PaperTrader()
         self.metrics = ensure_daily_metrics({}, day=time.strftime("%Y-%m-%d"))
@@ -196,6 +210,9 @@ class MRMonitor:
         self._last_fetch: dict[str, float] = {}
         self._exchange_synced = False
         self._next_exchange_sync_at = 0.0
+        self.kill_switch_state = {"enabled": False, "reason": "", "source": "runtime"}
+        self._kill_switch_notified_state: tuple[bool, str, str] | None = None
+        self._kill_switch_market_notice: dict[str, float] = {}
         self._hydrate_state()
 
     def _mode_label(self) -> str:
@@ -302,6 +319,27 @@ class MRMonitor:
         if self._exchange_synced:
             self._save_state()
 
+    def _refresh_kill_switch(self) -> None:
+        state = effective_kill_switch(self.kill_switch_name)
+        token = (bool(state.get("enabled")), str(state.get("reason") or ""), str(state.get("source") or "runtime"))
+        if token != self._kill_switch_notified_state:
+            if token[0]:
+                self._notify(kill_switch_enabled_message(reason=token[1], source=token[2]))
+            elif self._kill_switch_notified_state is not None:
+                self._notify(kill_switch_disabled_message())
+            self._kill_switch_notified_state = token
+        self.kill_switch_state = state
+
+    def _kill_switch_blocks_entry(self, market: str) -> bool:
+        if not bool(self.kill_switch_state.get("enabled")):
+            return False
+        now = time.time()
+        last_notice = float(self._kill_switch_market_notice.get(market) or 0.0)
+        if now - last_notice >= 600.0:
+            self._notify(kill_switch_block_message(self._mode_label(), market=market))
+            self._kill_switch_market_notice[market] = now
+        return True
+
     def _place_order(
         self,
         *,
@@ -346,6 +384,8 @@ class MRMonitor:
             market=market,
             price=float(fill["price"]),
             cost=float(fill["cost"]),
+            fee_rate=0.0 if self.live_orders else self.cost_model.fee_rate,
+            slippage_bps=0.0 if self.live_orders else self.cost_model.slippage_bps,
             qty=float(fill["qty"]) if fill.get("qty") else None,
             strategy=self.strategy_name,
             order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
@@ -368,6 +408,8 @@ class MRMonitor:
             market=market,
             price=float(fill["price"]),
             reason=reason,
+            fee_rate=0.0 if self.live_orders else self.cost_model.fee_rate,
+            slippage_bps=0.0 if self.live_orders else self.cost_model.slippage_bps,
             order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
         )
         if event is None:
@@ -428,6 +470,9 @@ class MRMonitor:
             self._save_state()
 
     def _handle_entry(self, market: str, close_price: float, score: float) -> None:
+        self._refresh_kill_switch()
+        if self._kill_switch_blocks_entry(market):
+            return
         if len(self.trader.positions) >= self.max_open:
             self._notify(blocked_max_open_message(self._mode_label(), market=market, max_open=self.max_open))
             return
@@ -438,6 +483,8 @@ class MRMonitor:
             price_map=self.market_prices,
             market=market,
             day_start_equity=float(self.metrics.get("day_start_equity") or 0.0),
+            fee_rate=self.cost_model.fee_rate,
+            slippage_bps=self.cost_model.slippage_bps,
         )
         if not decision.allowed:
             self._notify(blocked_risk_message(self._mode_label(), market=market, reason=decision.blocked_reason, price=close_price))
@@ -541,7 +588,7 @@ class MRMonitor:
                 "sig": pending_signal,
                 "entry": updated_position.entry if updated_position else None,
             }
-            bt = backtest_signal_frame(frame, fee=self.fee)
+            bt = backtest_signal_frame(frame, fee=self.cost_model.fee_rate, slippage_bps=self.cost_model.slippage_bps)
             return {
                 "market": market,
                 "price": close_price,
@@ -564,7 +611,7 @@ class MRMonitor:
             "sig": "BUY" if updated_position else signal,
             "entry": updated_position.entry if updated_position else None,
         }
-        bt = backtest_signal_frame(frame, fee=self.fee)
+        bt = backtest_signal_frame(frame, fee=self.cost_model.fee_rate, slippage_bps=self.cost_model.slippage_bps)
         return {
             "market": market,
             "price": close_price,
@@ -580,6 +627,7 @@ class MRMonitor:
     def run_cycle(self, markets: list[str]) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []
         trades_before = len(self.trade_log)
+        self._refresh_kill_switch()
         self._sync_with_exchange()
         self._reconcile_pending_orders()
         for market in markets:
@@ -591,7 +639,12 @@ class MRMonitor:
                 print(f"process error {market}: {exc}")
             if self.per_request_sleep > 0:
                 time.sleep(self.per_request_sleep)
-        self.metrics["unrealized_pnl"] = total_unrealized_pnl(self.trader.to_state(), self.market_prices)
+        self.metrics["unrealized_pnl"] = total_unrealized_pnl(
+            self.trader.to_state(),
+            self.market_prices,
+            fee_rate=self.cost_model.fee_rate,
+            slippage_bps=self.cost_model.slippage_bps,
+        )
         self.metrics["total_pnl"] = float(self.metrics.get("realized_pnl") or 0.0) + float(self.metrics["unrealized_pnl"])
         table = pd.DataFrame(rows)
         if not table.empty:
@@ -605,6 +658,7 @@ class MRMonitor:
             "total_pnl": float(self.metrics["total_pnl"]),
             "table": table,
             "pending_orders": len(self.pending_orders),
+            "kill_switch": bool(self.kill_switch_state.get("enabled")),
         }
 
     def loop(self, markets: list[str], *, loop_seconds: int = 120, cycles: int = 0) -> None:
@@ -623,7 +677,8 @@ class MRMonitor:
             summary = self.run_cycle(markets)
             print(
                 f"[cycle {cycle_index}] processed={summary['processed']} open={summary['open']} "
-                f"pending={summary['pending_orders']} new_trades={summary['new_trades']} total_pnl={summary['total_pnl']:.0f}"
+                f"pending={summary['pending_orders']} kill={'ON' if summary['kill_switch'] else 'OFF'} "
+                f"new_trades={summary['new_trades']} total_pnl={summary['total_pnl']:.0f}"
             )
             if cycles and cycle_index >= cycles:
                 break
@@ -645,6 +700,8 @@ def parse_args():
     parser.add_argument("--per-request-sleep", type=float, default=0.12)
     parser.add_argument("--state-name", default="mr-worker")
     parser.add_argument("--reconcile-timeout-seconds", type=float, default=3.0)
+    parser.add_argument("--slippage-bps", type=float, default=3.0)
+    parser.add_argument("--kill-switch-name", default="trade-kill-switch")
     parser.add_argument("--no-exclude-stables", action="store_true", help="Keep stablecoin pairs in the universe")
     parser.add_argument("--fee", type=float, default=0.0005)
 
@@ -706,6 +763,8 @@ def main():
         per_request_sleep=args.per_request_sleep,
         state_name=args.state_name,
         reconcile_timeout_seconds=args.reconcile_timeout_seconds,
+        cost_model=cost_model_from_values(fee_rate=args.fee, slippage_bps=args.slippage_bps),
+        kill_switch_name=args.kill_switch_name,
     )
     if args.live_orders and os.getenv("UPBIT_LIVE") != "1":
         print("[WARN] --live-orders was set but UPBIT_LIVE is not 1, so the monitor stays in SIM mode.")

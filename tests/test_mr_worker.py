@@ -5,6 +5,7 @@ from types import MethodType
 import pandas as pd
 
 from src.execution import resolve_submitted_order
+from src.kill_switch import save_kill_switch
 from src.mr_worker import MRMonitor, fetch_top_markets
 from src.runtime_store import load_runtime_state
 
@@ -248,3 +249,39 @@ def test_live_monitor_syncs_positions_and_open_orders(monkeypatch):
     assert "KRW-BTC" in monitor.pending_orders
     assert monitor.trader.has_position("KRW-BTC")
     assert monitor.last_signal_state["KRW-BTC"]["sig"] == "SELL_PENDING"
+
+
+def test_kill_switch_blocks_new_entry_but_allows_exit(tmp_path, monkeypatch):
+    monkeypatch.setenv("UPBIT_RUNTIME_DIR", str(tmp_path))
+    save_kill_switch("trade-kill-switch", enabled=True, reason="테스트")
+
+    api = FakeAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        risk_limits={"max_trade_krw": 10000},
+        max_open=2,
+        min_fetch_seconds=0,
+        per_request_sleep=0,
+        kill_switch_name="trade-kill-switch",
+    )
+
+    buy_frames = [_signal_frame(buy=True, close=100.0)]
+
+    def buy_build_frame(self, market):
+        return buy_frames.pop(0)
+
+    monitor._build_frame = MethodType(buy_build_frame, monitor)
+    monitor.process_market("KRW-BTC")
+    assert not monitor.trader.has_position("KRW-BTC")
+
+    monitor.trader.enter_long(market="KRW-BTC", price=100.0, cost=10000.0, strategy="research_trend")
+    monitor.last_signal_state["KRW-BTC"] = {"sig": "BUY", "entry": 100.0}
+    sell_frames = [_signal_frame(sell=True, close=110.0)]
+
+    def sell_build_frame(self, market):
+        return sell_frames.pop(0)
+
+    monitor._build_frame = MethodType(sell_build_frame, monitor)
+    monitor.process_market("KRW-BTC")
+    assert not monitor.trader.has_position("KRW-BTC")

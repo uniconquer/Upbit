@@ -69,6 +69,13 @@ def test_backtest_signal_frame_runs_on_research_trend():
     assert "total_return_pct" in result
 
 
+def test_backtest_slippage_reduces_return():
+    frame = build_research_trend_signals(_sample_ohlcv())
+    base = backtest_signal_frame(frame, fee=0.0005, slippage_bps=0.0)
+    slipped = backtest_signal_frame(frame, fee=0.0005, slippage_bps=10.0)
+    assert float(slipped["total_return_pct"]) <= float(base["total_return_pct"])
+
+
 def test_paper_trader_round_trip():
     trader = PaperTrader()
     buy_event = trader.enter_long(market="KRW-BTC", price=100.0, cost=10000.0, strategy="research_trend")

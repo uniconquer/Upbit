@@ -75,3 +75,17 @@ def order_no_fill_message(mode: str, *, market: str, side: str) -> str:
 
 def lookup_failed_message(mode: str, *, market: str, side: str, error: object) -> str:
     return f"[{_mode_label(mode)}] {market} {_side_label(side)} 주문 조회 실패: {error}"
+
+
+def kill_switch_enabled_message(*, reason: str | None = None, source: str = "runtime") -> str:
+    reason_text = f" 사유: {reason}" if str(reason or "").strip() else ""
+    source_text = "환경변수" if source == "env" else "런타임 설정"
+    return f"[안전장치] 긴급중지가 활성화되었습니다. 신규 매수는 중단하고 자동 매도만 허용합니다. ({source_text}){reason_text}"
+
+
+def kill_switch_disabled_message() -> str:
+    return "[안전장치] 긴급중지가 해제되었습니다. 자동 매매를 다시 허용합니다."
+
+
+def kill_switch_block_message(mode: str, *, market: str) -> str:
+    return f"[{_mode_label(mode)}] {market} 매수 차단: 긴급중지가 활성화되어 있습니다"

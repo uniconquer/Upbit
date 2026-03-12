@@ -11,10 +11,14 @@ from plotly.subplots import make_subplots
 
 from exchange_state import sync_exchange_state
 from execution import build_pending_order, resolve_submitted_order
+from kill_switch import effective_kill_switch, load_kill_switch, save_kill_switch
 from notifier import get_notifier
 from notification_text import (
     blocked_risk_message,
     buy_filled_message,
+    kill_switch_block_message,
+    kill_switch_disabled_message,
+    kill_switch_enabled_message,
     lookup_failed_message,
     order_cancelled_message,
     order_failed_message,
@@ -27,6 +31,7 @@ from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_
 from runtime_store import load_runtime_state, save_runtime_state
 from strategy import backtest_signal_frame
 from strategy_engine import build_strategy_frame, strategy_label, strategy_options
+from trading_costs import TradingCostModel, cost_model_from_values
 from ui_theme import apply_chart_theme, page_intro
 from upbit_api import UpbitAPI
 from utils.formatters import fmt_full_number
@@ -38,11 +43,13 @@ flux_indicator = None
 _MARKETS_CACHE = {"data": None, "ts": 0.0}
 _CANDLES_CACHE: dict[tuple[str, str, int], dict[str, object]] = {}
 LIVE_RUNTIME_STATE = "live-desk"
+LIVE_KILL_SWITCH_NAME = "trade-kill-switch"
 LIVE_PARAM_WIDGETS = {
     "interval": "live_interval",
     "count": "live_count",
     "topn": "live_topn",
     "fee": "live_fee",
+    "slippage_bps": "live_slippage_bps",
     "strategy_name": "live_strategy_name",
     "fast_ema": "live_fast_ema",
     "slow_ema": "live_slow_ema",
@@ -255,6 +262,13 @@ def _sync_live_exchange_state(params: dict, last_state: dict) -> dict:
     )
 
 
+def _cost_model_from_params(params: dict) -> TradingCostModel:
+    return cost_model_from_values(
+        fee_rate=float(params.get("fee") or 0.0),
+        slippage_bps=float(params.get("slippage_bps") or 0.0),
+    )
+
+
 def _record_entry_trade(
     trader: PaperTrader,
     metrics: dict,
@@ -265,11 +279,15 @@ def _record_entry_trade(
     score: float | None,
     fill: dict[str, object],
     mode_label: str,
+    cost_model: TradingCostModel,
+    use_simulated_costs: bool,
 ) -> str:
     event = trader.enter_long(
         market=market,
         price=float(fill["price"]),
         cost=float(fill["cost"]),
+        fee_rate=cost_model.fee_rate if use_simulated_costs else 0.0,
+        slippage_bps=cost_model.slippage_bps if use_simulated_costs else 0.0,
         qty=float(fill["qty"]) if fill.get("qty") else None,
         strategy=strategy_name,
         order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
@@ -294,11 +312,15 @@ def _record_exit_trade(
     reason: str,
     fill: dict[str, object],
     mode_label: str,
+    cost_model: TradingCostModel,
+    use_simulated_costs: bool,
 ) -> str | None:
     event = trader.exit_long(
         market=market,
         price=float(fill["price"]),
         reason=reason,
+        fee_rate=cost_model.fee_rate if use_simulated_costs else 0.0,
+        slippage_bps=cost_model.slippage_bps if use_simulated_costs else 0.0,
         order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
     )
     if event is None:
@@ -318,6 +340,7 @@ def _reconcile_pending_orders(
     last_state: dict,
     strategy_name: str,
     timeout_seconds: float,
+    cost_model: TradingCostModel,
 ) -> None:
     if not api or not pending_orders:
         return
@@ -364,6 +387,8 @@ def _reconcile_pending_orders(
                     score=None,
                     fill=fill,
                     mode_label="LIVE",
+                    cost_model=cost_model,
+                    use_simulated_costs=False,
                 )
             )
             position = trader.get_position(market)
@@ -382,6 +407,8 @@ def _reconcile_pending_orders(
                 reason=str(pending.get("reason") or "signal"),
                 fill=fill,
                 mode_label="LIVE",
+                cost_model=cost_model,
+                use_simulated_costs=False,
             )
             if message:
                 notify.append(message)
@@ -392,6 +419,8 @@ def _scan_core(params: dict, last_state: dict) -> dict:
     exchange_synced = bool(params.get("_exchange_synced"))
     exchange_sync_due_at = float(params.get("_exchange_sync_due_at") or 0.0)
     live_orders = bool(params.get("live_trading")) and os.getenv("UPBIT_LIVE") == "1"
+    kill_switch = effective_kill_switch(str(params.get("kill_switch_name") or LIVE_KILL_SWITCH_NAME))
+    cost_model = _cost_model_from_params(params)
     sync_notifications: list[str] = []
     if live_orders and (not exchange_synced) and time.time() >= exchange_sync_due_at:
         sync_result = _sync_live_exchange_state(params, last_state)
@@ -440,6 +469,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
         last_state=last_state,
         strategy_name=strategy_name,
         timeout_seconds=reconcile_timeout_seconds,
+        cost_model=cost_model,
     )
 
     for _, row in ranked.head(int(params["topn"])).iterrows():
@@ -460,7 +490,11 @@ def _scan_core(params: dict, last_state: dict) -> dict:
             result_rows.append({"market": market, "last_signal": "WAIT", "error": repr(exc)})
             continue
 
-        bt = backtest_signal_frame(frame, fee=float(params["fee"]))
+        bt = backtest_signal_frame(
+            frame,
+            fee=float(params["fee"]),
+            slippage_bps=float(params.get("slippage_bps") or 0.0),
+        )
         last_row = frame.iloc[-1]
         signal = _current_signal(last_row)
         previous_signal = (last_state.get(market) or {}).get("sig", "WAIT")
@@ -501,8 +535,14 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                 price_map=price_map,
                 market=market,
                 day_start_equity=float(metrics["day_start_equity"]),
+                fee_rate=cost_model.fee_rate,
+                slippage_bps=cost_model.slippage_bps,
             )
             if decision.allowed:
+                if bool(kill_switch.get("enabled")):
+                    notify.append(kill_switch_block_message(mode_label, market=market))
+                    signal = "WAIT"
+                    continue
                 order_result = {"simulate": True}
                 if live_orders:
                     order_result = api.create_order(market, side="bid", ord_type="price", price=f"{int(decision.trade_cost)}", simulate=False)
@@ -549,6 +589,8 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                                 score=score,
                                 fill=fill,
                                 mode_label=mode_label,
+                                cost_model=cost_model,
+                                use_simulated_costs=not live_orders,
                             )
                         )
             else:
@@ -605,6 +647,8 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                         reason="signal",
                         fill=fill,
                         mode_label=mode_label,
+                        cost_model=cost_model,
+                        use_simulated_costs=not live_orders,
                     )
                     if trade_message:
                         notify.append(trade_message)
@@ -632,7 +676,12 @@ def _scan_core(params: dict, last_state: dict) -> dict:
         )
 
     positions_state = trader.to_state()
-    metrics["unrealized_pnl"] = total_unrealized_pnl(positions_state, price_map)
+    metrics["unrealized_pnl"] = total_unrealized_pnl(
+        positions_state,
+        price_map,
+        fee_rate=cost_model.fee_rate,
+        slippage_bps=cost_model.slippage_bps,
+    )
     metrics["total_pnl"] = float(metrics.get("realized_pnl") or 0.0) + float(metrics["unrealized_pnl"])
     table = pd.DataFrame(result_rows)
     if not table.empty:
@@ -648,6 +697,9 @@ def _scan_core(params: dict, last_state: dict) -> dict:
         "_pending_orders": pending_orders,
         "_exchange_synced": exchange_synced,
         "_exchange_sync_due_at": exchange_sync_due_at,
+        "_kill_switch_enabled": bool(kill_switch.get("enabled")),
+        "_kill_switch_reason": str(kill_switch.get("reason") or ""),
+        "_kill_switch_source": str(kill_switch.get("source") or "runtime"),
         "trades": trade_events,
     }
 
@@ -880,12 +932,13 @@ def render_live():
         return
     _hydrate_live_runtime()
 
-    controls = st.columns([1, 1, 1, 1, 1])
+    controls = st.columns([1, 1, 1, 1, 1, 1])
     interval = controls[0].selectbox("Interval", ["minute15", "minute30", "minute60", "minute240", "day"], index=1, key="live_interval")
     count = int(controls[1].number_input("Candles", 120, 1200, 360, 20, key="live_count"))
     topn = int(controls[2].number_input("Top Markets", 5, 60, 20, 1, key="live_topn"))
     fee = float(controls[3].number_input("Fee", 0.0, 0.01, 0.0005, 0.0001, format="%.4f", key="live_fee"))
-    auto = controls[4].checkbox("Auto sync", value=True, key="live_auto")
+    slippage_bps = float(controls[4].number_input("Slippage (bps)", 0.0, 100.0, 3.0, 0.5, key="live_slippage_bps"))
+    auto = controls[5].checkbox("Auto sync", value=True, key="live_auto")
     strategy_name, strategy_params = _strategy_controls("live")
 
     with st.expander("Live Trading Guard", expanded=False):
@@ -903,6 +956,39 @@ def render_live():
             st.warning("The confirmation word must be LIVE before execution is armed.")
         elif live_trading:
             st.success("Live order execution is armed.")
+
+    kill_state = load_kill_switch(LIVE_KILL_SWITCH_NAME)
+    with st.expander("Emergency Stop", expanded=bool(kill_state.get("enabled"))):
+        kill_cols = st.columns([1, 1, 2.2])
+        kill_reason = kill_cols[2].text_input(
+            "Reason",
+            value=str(kill_state.get("reason") or ""),
+            key="live_kill_switch_reason",
+            placeholder="예: 이상 체결 감지, 수동 점검",
+        )
+        enable_kill = kill_cols[0].button("Enable Stop", use_container_width=True)
+        disable_kill = kill_cols[1].button("Resume Trading", use_container_width=True)
+        if enable_kill:
+            kill_state = save_kill_switch(
+                LIVE_KILL_SWITCH_NAME,
+                enabled=True,
+                reason=kill_reason or "수동 긴급중지",
+            )
+            st.session_state["LIVE_KILL_SWITCH_NOTICE"] = kill_switch_enabled_message(
+                reason=kill_state.get("reason"),
+                source=str(kill_state.get("source") or "runtime"),
+            )
+        elif disable_kill:
+            kill_state = save_kill_switch(LIVE_KILL_SWITCH_NAME, enabled=False, reason="")
+            st.session_state["LIVE_KILL_SWITCH_NOTICE"] = kill_switch_disabled_message()
+
+    kill_state = effective_kill_switch(LIVE_KILL_SWITCH_NAME)
+    if st.session_state.get("LIVE_KILL_SWITCH_NOTICE"):
+        st.info(str(st.session_state["LIVE_KILL_SWITCH_NOTICE"]))
+    if bool(kill_state.get("enabled")):
+        st.error(kill_switch_enabled_message(reason=kill_state.get("reason"), source=str(kill_state.get("source") or "runtime")))
+    else:
+        st.caption("긴급중지가 비활성화되어 있습니다. 필요하면 위 패널에서 즉시 차단할 수 있습니다.")
 
     with st.expander("Risk Limits", expanded=False):
         row1 = st.columns(3)
@@ -929,10 +1015,12 @@ def render_live():
         "count": count,
         "topn": topn,
         "fee": fee,
+        "slippage_bps": slippage_bps,
         "strategy_name": strategy_name,
         "risk_limits": risk_limits,
         "live_trading": live_trading,
         "reconcile_timeout_seconds": 3.0,
+        "kill_switch_name": LIVE_KILL_SWITCH_NAME,
         **strategy_params,
     }
 
@@ -987,13 +1075,14 @@ def render_live():
                 st.session_state["LIVE_LAST_CONSUMED_RUN"] = snapshot.get("last_run")
 
     metrics = st.session_state.get("LIVE_METRICS") or {}
-    metric_cols = st.columns(6)
+    metric_cols = st.columns(7)
     metric_cols[0].metric("Day", metrics.get("day_date", "-"))
     metric_cols[1].metric("Daily Buy", fmt_full_number(metrics.get("daily_buy"), 0))
     metric_cols[2].metric("Realized", fmt_full_number(metrics.get("realized_pnl"), 0))
     metric_cols[3].metric("Unrealized", fmt_full_number(metrics.get("unrealized_pnl"), 0))
     metric_cols[4].metric("Total PnL", fmt_full_number(metrics.get("total_pnl"), 0))
     metric_cols[5].metric("Worker", "ON" if st.session_state.get("LIVE_WORKING") else "OFF")
+    metric_cols[6].metric("Kill", "ON" if bool(kill_state.get("enabled")) else "OFF")
 
     result = st.session_state.get("LIVE_RESULTS") or {}
     table = result.get("table")
@@ -1010,13 +1099,20 @@ def render_live():
     if positions:
         position_rows = []
         market_price_map = {row["market"]: row["price"] for row in table.to_dict("records")} if table is not None and not table.empty else {}
+        cost_model = cost_model_from_values(fee_rate=fee, slippage_bps=slippage_bps)
         for market, raw in positions.items():
             current_price = market_price_map.get(market)
             entry = float(raw.get("entry") or 0.0)
             qty = float(raw.get("qty") or 0.0)
-            pnl_value = ((float(current_price) - entry) * qty) if current_price is not None else None
-            pnl_pct = (((float(current_price) / entry) - 1.0) * 100) if current_price is not None and entry else None
-            position_rows.append({"market": market, "qty": qty, "entry": entry, "current_price": current_price, "pnl_value": pnl_value, "pnl_pct": pnl_pct})
+            cost = float(raw.get("cost") or 0.0)
+            if current_price is not None:
+                exit_view = cost_model.simulate_exit(price=float(current_price), qty=qty, cost_basis=cost)
+                pnl_value = exit_view["pnl_value"]
+                pnl_pct = exit_view["pnl_pct"]
+            else:
+                pnl_value = None
+                pnl_pct = None
+            position_rows.append({"market": market, "qty": qty, "entry": entry, "cost": cost, "current_price": current_price, "pnl_value": pnl_value, "pnl_pct": pnl_pct})
         st.subheader("Open Positions")
         st.dataframe(pd.DataFrame(position_rows), use_container_width=True, hide_index=True)
 

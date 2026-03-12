@@ -8,6 +8,11 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 
+try:
+    from trading_costs import cost_model_from_values
+except ImportError:
+    from src.trading_costs import cost_model_from_values
+
 
 @dataclass(slots=True)
 class Signal:
@@ -234,6 +239,7 @@ def backtest_signal_frame(
     entry_col: str = "buy_signal",
     exit_col: str = "sell_signal",
     fee: float = 0.0005,
+    slippage_bps: float = 3.0,
 ) -> dict[str, object]:
     empty_result = {
         "trades": 0,
@@ -252,6 +258,7 @@ def backtest_signal_frame(
     trades: list[float] = []
     peak = 1.0
     max_drawdown = 0.0
+    cost_model = cost_model_from_values(fee_rate=fee, slippage_bps=slippage_bps)
 
     for _, row in df.iterrows():
         price = row.get("close")
@@ -260,10 +267,11 @@ def backtest_signal_frame(
 
         if (not in_position) and bool(row.get(entry_col)):
             in_position = True
-            entry_price = float(price)
+            entry_price = cost_model.buy_price(float(price))
 
         if in_position and bool(row.get(exit_col)):
-            gross = float(price) / entry_price
+            exit_price = cost_model.sell_price(float(price))
+            gross = exit_price / entry_price if entry_price else 1.0
             net = gross * (1 - fee) * (1 - fee)
             equity_value *= net
             trades.append((net - 1) * 100)
