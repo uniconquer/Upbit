@@ -9,8 +9,9 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from daily_summary import current_kst_day, rollover_daily_report
 from exchange_state import sync_exchange_state
-from execution import build_pending_order, resolve_submitted_order
+from execution import build_pending_order, pending_fill_delta, resolve_submitted_order
 from kill_switch import effective_kill_switch, load_kill_switch, save_kill_switch
 from notifier import get_notifier
 from notification_text import (
@@ -213,6 +214,9 @@ def _hydrate_live_runtime() -> None:
         st.session_state.setdefault("LIVE_POSITIONS", dict(snapshot.get("positions") or {}))
         st.session_state.setdefault("LIVE_PENDING_ORDERS", dict(snapshot.get("pending_orders") or {}))
         st.session_state.setdefault("LIVE_TRADES", list(snapshot.get("trade_log") or []))
+        st.session_state.setdefault("LIVE_DAILY_REPORTS", dict(snapshot.get("daily_reports") or {}))
+        saved_last_report_day = str(snapshot.get("last_daily_report_day") or "").strip()
+        st.session_state.setdefault("LIVE_LAST_DAILY_REPORT_DAY", saved_last_report_day or None)
         st.session_state.setdefault("LIVE_LAST_RUN", snapshot.get("last_run"))
     st.session_state["LIVE_RUNTIME_HYDRATED"] = True
 
@@ -225,6 +229,8 @@ def _persist_live_runtime(
     last_signal_state: dict,
     pending_orders: dict,
     trade_log: list[dict],
+    daily_reports: dict,
+    last_daily_report_day: str | None,
     last_run: float | None,
 ) -> None:
     public_params = {key: value for key, value in params.items() if not str(key).startswith("_")}
@@ -239,6 +245,8 @@ def _persist_live_runtime(
             "last_signal_state": last_signal_state,
             "pending_orders": pending_orders,
             "trade_log": trade_log[-500:],
+            "daily_reports": daily_reports,
+            "last_daily_report_day": last_daily_report_day,
             "last_run": last_run,
         },
     )
@@ -281,17 +289,29 @@ def _record_entry_trade(
     mode_label: str,
     cost_model: TradingCostModel,
     use_simulated_costs: bool,
-) -> str:
-    event = trader.enter_long(
-        market=market,
-        price=float(fill["price"]),
-        cost=float(fill["cost"]),
-        fee_rate=cost_model.fee_rate if use_simulated_costs else 0.0,
-        slippage_bps=cost_model.slippage_bps if use_simulated_costs else 0.0,
-        qty=float(fill["qty"]) if fill.get("qty") else None,
-        strategy=strategy_name,
-        order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
-    )
+) -> str | None:
+    if use_simulated_costs:
+        event = trader.enter_long(
+            market=market,
+            price=float(fill["price"]),
+            cost=float(fill["cost"]),
+            fee_rate=cost_model.fee_rate,
+            slippage_bps=cost_model.slippage_bps,
+            qty=float(fill["qty"]) if fill.get("qty") else None,
+            strategy=strategy_name,
+            order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
+        )
+    else:
+        event = trader.apply_buy_fill(
+            market=market,
+            qty=float(fill["qty"]),
+            gross_value=float(fill.get("value") or 0.0),
+            fee_paid=float(fill.get("paid_fee") or 0.0),
+            strategy=strategy_name,
+            order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
+        )
+    if event is None:
+        return None
     metrics["daily_buy"] = float(metrics.get("daily_buy") or 0.0) + float(event["cost"])
     trade_events.append(event)
     return buy_filled_message(
@@ -300,6 +320,8 @@ def _record_entry_trade(
         price=float(event["price"]),
         alloc=float(event["cost"]),
         score=score,
+        partial=bool(fill.get("_partial")),
+        qty=float(event["qty"]),
     )
 
 
@@ -315,19 +337,36 @@ def _record_exit_trade(
     cost_model: TradingCostModel,
     use_simulated_costs: bool,
 ) -> str | None:
-    event = trader.exit_long(
-        market=market,
-        price=float(fill["price"]),
-        reason=reason,
-        fee_rate=cost_model.fee_rate if use_simulated_costs else 0.0,
-        slippage_bps=cost_model.slippage_bps if use_simulated_costs else 0.0,
-        order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
-    )
+    if use_simulated_costs:
+        event = trader.exit_long(
+            market=market,
+            price=float(fill["price"]),
+            reason=reason,
+            fee_rate=cost_model.fee_rate,
+            slippage_bps=cost_model.slippage_bps,
+            order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
+        )
+    else:
+        event = trader.apply_sell_fill(
+            market=market,
+            qty=float(fill["qty"]),
+            gross_value=float(fill.get("value") or 0.0),
+            fee_paid=float(fill.get("paid_fee") or 0.0),
+            reason=reason,
+            order_uuid=str(fill.get("order_uuid")) if fill.get("order_uuid") else None,
+        )
     if event is None:
         return None
     metrics["realized_pnl"] = float(metrics.get("realized_pnl") or 0.0) + float(event["pnl_value"])
     trade_events.append(event)
-    return sell_filled_message(mode_label, market=market, price=float(event["price"]), pnl_pct=float(event["pnl_pct"]))
+    return sell_filled_message(
+        mode_label,
+        market=market,
+        price=float(event["price"]),
+        pnl_pct=float(event["pnl_pct"]),
+        partial=bool(fill.get("_partial")),
+        qty=float(event["qty"]),
+    )
 
 
 def _reconcile_pending_orders(
@@ -352,6 +391,7 @@ def _reconcile_pending_orders(
             api,
             {"uuid": pending["uuid"]},
             live_orders=True,
+            side=str(pending.get("side") or "").lower(),
             fallback_price=float(pending.get("fallback_price") or 0.0),
             fallback_cost=float(pending.get("requested_cost") or 0.0) or None,
             fallback_qty=float(pending.get("requested_qty") or 0.0) or None,
@@ -361,7 +401,48 @@ def _reconcile_pending_orders(
         status = str(resolution.get("status") or "")
         fill = dict(resolution.get("fill") or {})
         side = str(pending.get("side") or "").lower()
+        updated_pending, delta = pending_fill_delta(pending, fill)
+        if float(delta.get("qty") or 0.0) > 0:
+            delta_fill = {
+                "order_uuid": fill.get("order_uuid"),
+                "qty": float(delta["qty"]),
+                "value": float(delta["value"]),
+                "paid_fee": float(delta["paid_fee"]),
+                "cost": float(delta["net_value"]),
+                "price": float(delta["price"] or fill.get("price") or 0.0),
+                "_partial": status == "pending",
+            }
+            if side == "bid":
+                message = _record_entry_trade(
+                    trader,
+                    metrics,
+                    trade_events,
+                    market=market,
+                    strategy_name=strategy_name,
+                    score=None,
+                    fill=delta_fill,
+                    mode_label="LIVE",
+                    cost_model=cost_model,
+                    use_simulated_costs=False,
+                )
+                if message:
+                    notify.append(message)
+            elif side == "ask":
+                message = _record_exit_trade(
+                    trader,
+                    metrics,
+                    trade_events,
+                    market=market,
+                    reason=str(pending.get("reason") or "signal"),
+                    fill=delta_fill,
+                    mode_label="LIVE",
+                    cost_model=cost_model,
+                    use_simulated_costs=False,
+                )
+                if message:
+                    notify.append(message)
         if status == "pending":
+            pending_orders[market] = updated_pending
             continue
         pending_orders.pop(market, None)
         if status == "cancelled":
@@ -373,46 +454,17 @@ def _reconcile_pending_orders(
             notify.append(lookup_failed_message("LIVE", market=market, side=side, error=resolution.get("error")))
             continue
         if side == "bid":
-            if float(fill.get("qty") or 0.0) <= 0 or float(fill.get("cost") or 0.0) <= 0:
+            if float(updated_pending.get("filled_qty") or 0.0) <= 0 or float(updated_pending.get("filled_net_value") or 0.0) <= 0:
                 notify.append(order_no_fill_message("LIVE", market=market, side="buy"))
                 last_state[market] = {"sig": "WAIT", "entry": None}
                 continue
-            notify.append(
-                _record_entry_trade(
-                    trader,
-                    metrics,
-                    trade_events,
-                    market=market,
-                    strategy_name=strategy_name,
-                    score=None,
-                    fill=fill,
-                    mode_label="LIVE",
-                    cost_model=cost_model,
-                    use_simulated_costs=False,
-                )
-            )
             position = trader.get_position(market)
             last_state[market] = {"sig": "BUY", "entry": position.entry if position else None}
         elif side == "ask":
-            if not trader.has_position(market):
-                continue
-            if float(fill.get("qty") or 0.0) <= 0:
+            if float(updated_pending.get("filled_qty") or 0.0) <= 0:
                 notify.append(order_no_fill_message("LIVE", market=market, side="sell"))
                 continue
-            message = _record_exit_trade(
-                trader,
-                metrics,
-                trade_events,
-                market=market,
-                reason=str(pending.get("reason") or "signal"),
-                fill=fill,
-                mode_label="LIVE",
-                cost_model=cost_model,
-                use_simulated_costs=False,
-            )
-            if message:
-                notify.append(message)
-                last_state[market] = {"sig": "SELL", "entry": None}
+            last_state[market] = {"sig": "SELL", "entry": None}
 
 
 def _scan_core(params: dict, last_state: dict) -> dict:
@@ -421,6 +473,10 @@ def _scan_core(params: dict, last_state: dict) -> dict:
     live_orders = bool(params.get("live_trading")) and os.getenv("UPBIT_LIVE") == "1"
     kill_switch = effective_kill_switch(str(params.get("kill_switch_name") or LIVE_KILL_SWITCH_NAME))
     cost_model = _cost_model_from_params(params)
+    current_day = current_kst_day()
+    daily_reports = dict(params.get("_daily_reports") or {})
+    saved_last_report_day = str(params.get("_last_daily_report_day") or "").strip()
+    last_daily_report_day = saved_last_report_day or None
     sync_notifications: list[str] = []
     if live_orders and (not exchange_synced) and time.time() >= exchange_sync_due_at:
         sync_result = _sync_live_exchange_state(params, last_state)
@@ -430,24 +486,44 @@ def _scan_core(params: dict, last_state: dict) -> dict:
         exchange_synced = bool(sync_result.get("synced"))
         exchange_sync_due_at = 0.0 if exchange_synced else (time.time() + 60.0)
         sync_notifications = list(sync_result.get("notifications") or [])
+    trader = PaperTrader(params.get("_positions"))
+    rollover = rollover_daily_report(
+        current_day=current_day,
+        mode="LIVE" if live_orders else "SIM",
+        metrics=params.get("_metrics"),
+        trade_log=list(params.get("_trade_log") or []),
+        positions=trader.to_state(),
+        pending_orders=params.get("_pending_orders"),
+        daily_reports=daily_reports,
+        last_report_day=last_daily_report_day,
+    )
+    daily_reports = dict(rollover.get("daily_reports") or {})
+    saved_last_report_day = str(rollover.get("last_report_day") or "").strip()
+    last_daily_report_day = saved_last_report_day or None
+    notify: list[str] = []
+    report_message = rollover.get("message")
+    if isinstance(report_message, str) and report_message.strip():
+        notify.append(report_message)
+    notify.extend(sync_notifications)
     ranked = _markets_rank()
     if ranked.empty:
         return {
             "table": pd.DataFrame(),
             "detail": {},
             "last_sig": last_state,
-            "notify": [],
+            "notify": notify,
             "trades": [],
-            "_metrics": ensure_daily_metrics(params.get("_metrics"), day=time.strftime("%Y-%m-%d")),
+            "_metrics": ensure_daily_metrics(params.get("_metrics"), day=current_day),
             "_positions": dict(params.get("_positions") or {}),
             "_pending_orders": dict(params.get("_pending_orders") or {}),
+            "_daily_reports": daily_reports,
+            "_last_daily_report_day": last_daily_report_day,
             "_exchange_synced": exchange_synced,
             "_exchange_sync_due_at": exchange_sync_due_at,
             "last_run": time.time(),
         }
 
-    trader = PaperTrader(params.get("_positions"))
-    metrics = ensure_daily_metrics(params.get("_metrics"), day=time.strftime("%Y-%m-%d"))
+    metrics = ensure_daily_metrics(params.get("_metrics"), day=current_day)
     metrics["day_start_equity"] = _resolve_day_start_equity(metrics, trader)
     risk_config = risk_config_from_dict(params.get("risk_limits"))
     strategy_name = str(params.get("strategy_name", "research_trend"))
@@ -457,7 +533,6 @@ def _scan_core(params: dict, last_state: dict) -> dict:
 
     result_rows: list[dict[str, object]] = []
     detail_cache: dict[str, dict[str, object]] = {}
-    notify: list[str] = list(sync_notifications)
     trade_events: list[dict[str, object]] = []
     price_map: dict[str, float] = {}
     _reconcile_pending_orders(
@@ -550,10 +625,12 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                     api,
                     order_result,
                     live_orders=live_orders,
+                    side="bid",
                     fallback_price=close_price,
                     fallback_cost=decision.trade_cost,
                     timeout_seconds=reconcile_timeout_seconds,
                 )
+                fill = dict(resolution.get("fill") or {})
                 if resolution.get("status") == "error":
                     notify.append(order_failed_message(mode_label, market=market, side="buy", error=resolution.get("error")))
                     signal = "WAIT"
@@ -561,6 +638,21 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                     notify.append(order_cancelled_message(mode_label, market=market, side="buy"))
                     signal = "WAIT"
                 elif resolution.get("status") == "pending" and live_orders:
+                    if float(fill.get("qty") or 0.0) > 0:
+                        partial_message = _record_entry_trade(
+                            trader,
+                            metrics,
+                            trade_events,
+                            market=market,
+                            strategy_name=strategy_name,
+                            score=score,
+                            fill={**fill, "_partial": True},
+                            mode_label=mode_label,
+                            cost_model=cost_model,
+                            use_simulated_costs=False,
+                        )
+                        if partial_message:
+                            notify.append(partial_message)
                     pending_orders[market] = build_pending_order(
                         market=market,
                         side="bid",
@@ -568,6 +660,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                         fallback_price=close_price,
                         order_result=resolution.get("order"),
                         requested_cost=decision.trade_cost,
+                        fill=fill,
                     )
                     notify.append(
                         order_pending_message("LIVE", market=market, side="buy")
@@ -579,20 +672,20 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                         notify.append(order_no_fill_message(mode_label, market=market, side="buy"))
                         signal = "WAIT"
                     else:
-                        notify.append(
-                            _record_entry_trade(
-                                trader,
-                                metrics,
-                                trade_events,
-                                market=market,
-                                strategy_name=strategy_name,
-                                score=score,
-                                fill=fill,
-                                mode_label=mode_label,
-                                cost_model=cost_model,
-                                use_simulated_costs=not live_orders,
-                            )
+                        trade_message = _record_entry_trade(
+                            trader,
+                            metrics,
+                            trade_events,
+                            market=market,
+                            strategy_name=strategy_name,
+                            score=score,
+                            fill={**fill, "_partial": False},
+                            mode_label=mode_label,
+                            cost_model=cost_model,
+                            use_simulated_costs=not live_orders,
                         )
+                        if trade_message:
+                            notify.append(trade_message)
             else:
                 notify.append(blocked_risk_message(mode_label, market=market, reason=decision.blocked_reason, price=close_price))
                 signal = "WAIT"
@@ -611,10 +704,12 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                 api,
                 order_result,
                 live_orders=live_orders,
+                side="ask",
                 fallback_price=close_price,
                 fallback_qty=position.qty,
                 timeout_seconds=reconcile_timeout_seconds,
             )
+            fill = dict(resolution.get("fill") or {})
             if resolution.get("status") == "error":
                 notify.append(order_failed_message(mode_label, market=market, side="sell", error=resolution.get("error")))
                 signal = "BUY"
@@ -622,6 +717,20 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                 notify.append(order_cancelled_message(mode_label, market=market, side="sell"))
                 signal = "BUY"
             elif resolution.get("status") == "pending" and live_orders:
+                if float(fill.get("qty") or 0.0) > 0:
+                    trade_message = _record_exit_trade(
+                        trader,
+                        metrics,
+                        trade_events,
+                        market=market,
+                        reason="signal",
+                        fill={**fill, "_partial": True},
+                        mode_label=mode_label,
+                        cost_model=cost_model,
+                        use_simulated_costs=False,
+                    )
+                    if trade_message:
+                        notify.append(trade_message)
                 pending_orders[market] = build_pending_order(
                     market=market,
                     side="ask",
@@ -630,6 +739,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                     order_result=resolution.get("order"),
                     requested_qty=position.qty,
                     reason="signal",
+                    fill=fill,
                 )
                 notify.append(order_pending_message("LIVE", market=market, side="sell"))
                 signal = "SELL_PENDING"
@@ -645,7 +755,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                         trade_events,
                         market=market,
                         reason="signal",
-                        fill=fill,
+                        fill={**fill, "_partial": False},
                         mode_label=mode_label,
                         cost_model=cost_model,
                         use_simulated_costs=not live_orders,
@@ -656,8 +766,14 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                         signal = "BUY"
 
         updated_position = trader.get_position(market)
+        updated_pending = pending_orders.get(market)
+        if updated_pending:
+            updated_side = str(updated_pending.get("side") or "").lower()
+            signal_state = "BUY_PENDING" if updated_side == "bid" else "SELL_PENDING"
+        else:
+            signal_state = "BUY" if updated_position else signal
         last_state[market] = {
-            "sig": "BUY" if updated_position else signal,
+            "sig": signal_state,
             "entry": updated_position.entry if updated_position else None,
         }
         detail_cache[market] = {"df": frame, "bt": bt}
@@ -670,8 +786,8 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                 "return_pct": float(bt["total_return_pct"]),
                 "win_rate_pct": float(bt["win_rate_pct"]),
                 "max_drawdown_pct": float(bt["max_drawdown_pct"]),
-                "last_signal": "BUY" if updated_position else signal,
-                "position": "OPEN" if updated_position else "-",
+                "last_signal": signal_state,
+                "position": "OPEN" if updated_position else ("PENDING" if updated_pending else "-"),
             }
         )
 
@@ -695,6 +811,8 @@ def _scan_core(params: dict, last_state: dict) -> dict:
         "_metrics": metrics,
         "_positions": positions_state,
         "_pending_orders": pending_orders,
+        "_daily_reports": daily_reports,
+        "_last_daily_report_day": last_daily_report_day,
         "_exchange_synced": exchange_synced,
         "_exchange_sync_due_at": exchange_sync_due_at,
         "_kill_switch_enabled": bool(kill_switch.get("enabled")),
@@ -711,6 +829,9 @@ def _scan(params: dict):
         scan_params["_metrics"] = st.session_state.get("LIVE_METRICS")
         scan_params["_positions"] = st.session_state.get("LIVE_POSITIONS")
         scan_params["_pending_orders"] = st.session_state.get("LIVE_PENDING_ORDERS")
+        scan_params["_trade_log"] = st.session_state.get("LIVE_TRADES")
+        scan_params["_daily_reports"] = st.session_state.get("LIVE_DAILY_REPORTS")
+        scan_params["_last_daily_report_day"] = st.session_state.get("LIVE_LAST_DAILY_REPORT_DAY")
         scan_params["_exchange_synced"] = st.session_state.get("LIVE_EXCHANGE_SYNCED")
         scan_params["_exchange_sync_due_at"] = st.session_state.get("LIVE_EXCHANGE_SYNC_DUE_AT")
         snapshot = _scan_core(scan_params, st.session_state.get("LIVE_LAST_SIG", {}))
@@ -720,6 +841,8 @@ def _scan(params: dict):
         st.session_state["LIVE_METRICS"] = snapshot.get("_metrics")
         st.session_state["LIVE_POSITIONS"] = snapshot.get("_positions")
         st.session_state["LIVE_PENDING_ORDERS"] = snapshot.get("_pending_orders") or {}
+        st.session_state["LIVE_DAILY_REPORTS"] = snapshot.get("_daily_reports") or {}
+        st.session_state["LIVE_LAST_DAILY_REPORT_DAY"] = snapshot.get("_last_daily_report_day")
         st.session_state["LIVE_EXCHANGE_SYNCED"] = bool(snapshot.get("_exchange_synced"))
         st.session_state["LIVE_EXCHANGE_SYNC_DUE_AT"] = float(snapshot.get("_exchange_sync_due_at") or 0.0)
         if snapshot.get("trades"):
@@ -733,6 +856,8 @@ def _scan(params: dict):
             last_signal_state=st.session_state.get("LIVE_LAST_SIG") or {},
             pending_orders=st.session_state.get("LIVE_PENDING_ORDERS") or {},
             trade_log=st.session_state.get("LIVE_TRADES") or [],
+            daily_reports=st.session_state.get("LIVE_DAILY_REPORTS") or {},
+            last_daily_report_day=st.session_state.get("LIVE_LAST_DAILY_REPORT_DAY"),
             last_run=st.session_state.get("LIVE_LAST_RUN"),
         )
         notifier = get_notifier()
@@ -756,6 +881,8 @@ class _Worker:
         self.positions: dict = {}
         self.pending_orders: dict = {}
         self.trade_log: list[dict] = []
+        self.daily_reports: dict = {}
+        self.last_daily_report_day: str | None = None
         self.exchange_synced = False
         self.exchange_sync_due_at = 0.0
         self.last_error: str | None = None
@@ -784,6 +911,11 @@ class _Worker:
             self.last_signal_state = dict(initial_state.get("last_signal_state") or {})
         if "trade_log" in initial_state:
             self.trade_log = list(initial_state.get("trade_log") or [])[-500:]
+        if "daily_reports" in initial_state:
+            self.daily_reports = dict(initial_state.get("daily_reports") or {})
+        if "last_daily_report_day" in initial_state:
+            saved_last_report_day = str(initial_state.get("last_daily_report_day") or "").strip()
+            self.last_daily_report_day = saved_last_report_day or None
         if "exchange_synced" in initial_state:
             self.exchange_synced = bool(initial_state.get("exchange_synced"))
         if "exchange_sync_due_at" in initial_state:
@@ -797,6 +929,9 @@ class _Worker:
                     params["_metrics"] = self.metrics
                     params["_positions"] = self.positions
                     params["_pending_orders"] = self.pending_orders
+                    params["_trade_log"] = self.trade_log
+                    params["_daily_reports"] = self.daily_reports
+                    params["_last_daily_report_day"] = self.last_daily_report_day
                     params["_exchange_synced"] = self.exchange_synced
                     params["_exchange_sync_due_at"] = self.exchange_sync_due_at
                     snapshot = _scan_core(params, self.last_signal_state)
@@ -814,6 +949,11 @@ class _Worker:
                             self.positions = dict(snapshot.get("_positions") or {})
                         if "_pending_orders" in snapshot:
                             self.pending_orders = dict(snapshot.get("_pending_orders") or {})
+                        if "_daily_reports" in snapshot:
+                            self.daily_reports = dict(snapshot.get("_daily_reports") or {})
+                        if "_last_daily_report_day" in snapshot:
+                            saved_last_report_day = str(snapshot.get("_last_daily_report_day") or "").strip()
+                            self.last_daily_report_day = saved_last_report_day or None
                         self.exchange_synced = bool(snapshot.get("_exchange_synced"))
                         self.exchange_sync_due_at = float(snapshot.get("_exchange_sync_due_at") or 0.0)
                         if "last_sig" in snapshot:
@@ -829,6 +969,8 @@ class _Worker:
                             last_signal_state=self.last_signal_state,
                             pending_orders=self.pending_orders,
                             trade_log=self.trade_log,
+                            daily_reports=self.daily_reports,
+                            last_daily_report_day=self.last_daily_report_day,
                             last_run=snapshot.get("last_run"),
                         )
                 except Exception as exc:
@@ -1047,6 +1189,8 @@ def render_live():
                 "pending_orders": st.session_state.get("LIVE_PENDING_ORDERS"),
                 "last_signal_state": st.session_state.get("LIVE_LAST_SIG"),
                 "trade_log": st.session_state.get("LIVE_TRADES"),
+                "daily_reports": st.session_state.get("LIVE_DAILY_REPORTS"),
+                "last_daily_report_day": st.session_state.get("LIVE_LAST_DAILY_REPORT_DAY"),
                 "exchange_synced": st.session_state.get("LIVE_EXCHANGE_SYNCED"),
                 "exchange_sync_due_at": st.session_state.get("LIVE_EXCHANGE_SYNC_DUE_AT"),
             },
@@ -1066,6 +1210,8 @@ def render_live():
             st.session_state["LIVE_METRICS"] = snapshot.get("_metrics")
             st.session_state["LIVE_POSITIONS"] = snapshot.get("_positions")
             st.session_state["LIVE_PENDING_ORDERS"] = snapshot.get("_pending_orders") or {}
+            st.session_state["LIVE_DAILY_REPORTS"] = snapshot.get("_daily_reports") or {}
+            st.session_state["LIVE_LAST_DAILY_REPORT_DAY"] = snapshot.get("_last_daily_report_day")
             st.session_state["LIVE_EXCHANGE_SYNCED"] = bool(snapshot.get("_exchange_synced"))
             st.session_state["LIVE_EXCHANGE_SYNC_DUE_AT"] = float(snapshot.get("_exchange_sync_due_at") or 0.0)
             if snapshot.get("trades") and snapshot.get("last_run") != st.session_state.get("LIVE_LAST_CONSUMED_RUN"):

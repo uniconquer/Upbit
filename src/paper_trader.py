@@ -106,6 +106,56 @@ class PaperTrader:
             "order_uuid": order_uuid,
         }
 
+    def apply_buy_fill(
+        self,
+        *,
+        market: str,
+        qty: float,
+        gross_value: float,
+        fee_paid: float,
+        strategy: str,
+        order_uuid: str | None = None,
+        timestamp: float | None = None,
+    ) -> dict[str, Any] | None:
+        resolved_qty = float(qty)
+        if resolved_qty <= 0:
+            return None
+
+        trade_ts = float(timestamp or time.time())
+        total_cost = float(gross_value) + float(fee_paid)
+        fill_price = (total_cost / resolved_qty) if resolved_qty > 0 else 0.0
+        position = self.positions.get(market)
+        if position is None:
+            position = PaperPosition(
+                market=market,
+                qty=resolved_qty,
+                entry=fill_price,
+                cost=total_cost,
+                opened_at=trade_ts,
+                strategy=strategy,
+                entry_order_uuid=order_uuid,
+            )
+            self.positions[market] = position
+        else:
+            position.qty += resolved_qty
+            position.cost += total_cost
+            position.entry = (position.cost / position.qty) if position.qty > 0 else 0.0
+            position.entry_order_uuid = order_uuid or position.entry_order_uuid
+            position.strategy = strategy or position.strategy
+
+        return {
+            "ts": trade_ts,
+            "market": market,
+            "side": "BUY",
+            "price": fill_price,
+            "qty": resolved_qty,
+            "cost": total_cost,
+            "gross_value": float(gross_value),
+            "fee_paid": float(fee_paid),
+            "strategy": strategy,
+            "order_uuid": order_uuid,
+        }
+
     def exit_long(
         self,
         *,
@@ -136,6 +186,57 @@ class PaperTrader:
             "net_proceeds": exit_fill["net_proceeds"],
             "pnl_value": exit_fill["pnl_value"],
             "pnl_pct": exit_fill["pnl_pct"],
+            "reason": reason,
+            "strategy": position.strategy,
+            "order_uuid": order_uuid,
+        }
+
+    def apply_sell_fill(
+        self,
+        *,
+        market: str,
+        qty: float,
+        gross_value: float,
+        fee_paid: float,
+        reason: str,
+        order_uuid: str | None = None,
+        timestamp: float | None = None,
+    ) -> dict[str, Any] | None:
+        position = self.positions.get(market)
+        resolved_qty = min(float(qty), position.qty) if position else 0.0
+        if position is None or resolved_qty <= 0:
+            return None
+
+        trade_ts = float(timestamp or time.time())
+        original_entry = position.entry
+        allocated_cost = position.cost * (resolved_qty / position.qty) if position.qty > 0 else 0.0
+        net_proceeds = max(float(gross_value) - float(fee_paid), 0.0)
+        pnl_value = net_proceeds - allocated_cost
+        pnl_pct = ((net_proceeds / allocated_cost) - 1.0) * 100 if allocated_cost else 0.0
+        trade_price = (net_proceeds / resolved_qty) if resolved_qty > 0 else 0.0
+
+        remaining_qty = max(position.qty - resolved_qty, 0.0)
+        remaining_cost = max(position.cost - allocated_cost, 0.0)
+        if remaining_qty <= 1e-12:
+            self.positions.pop(market, None)
+        else:
+            position.qty = remaining_qty
+            position.cost = remaining_cost
+            position.entry = (remaining_cost / remaining_qty) if remaining_qty > 0 else 0.0
+
+        return {
+            "ts": trade_ts,
+            "market": market,
+            "side": "SELL",
+            "price": trade_price,
+            "qty": resolved_qty,
+            "entry": original_entry,
+            "cost": allocated_cost,
+            "gross_value": float(gross_value),
+            "fee_paid": float(fee_paid),
+            "net_proceeds": net_proceeds,
+            "pnl_value": pnl_value,
+            "pnl_pct": pnl_pct,
             "reason": reason,
             "strategy": position.strategy,
             "order_uuid": order_uuid,

@@ -69,6 +69,91 @@ class PendingLiveAPI(FakeAPI):
         }
 
 
+class PartialBuyLiveAPI(FakeAPI):
+    def __init__(self):
+        self.order_reads = 0
+
+    def create_order(self, *args, **kwargs):
+        return {"uuid": "order-partial-buy"}
+
+    def accounts(self):
+        if self.order_reads <= 1:
+            return [
+                {"currency": "KRW", "balance": "1000000", "locked": "0"},
+                {"currency": "BTC", "balance": "40", "locked": "0", "avg_buy_price": "100"},
+            ]
+        return [
+            {"currency": "KRW", "balance": "1000000", "locked": "0"},
+            {"currency": "BTC", "balance": "100", "locked": "0", "avg_buy_price": "100"},
+        ]
+
+    def get_order(self, uuid=None, identifier=None):
+        self.order_reads += 1
+        if self.order_reads == 1:
+            return {
+                "uuid": uuid or "order-partial-buy",
+                "side": "bid",
+                "state": "wait",
+                "remaining_volume": "60",
+                "executed_volume": "40",
+                "executed_funds": "4000",
+                "paid_fee": "0",
+                "avg_price": "100",
+            }
+        return {
+            "uuid": uuid or "order-partial-buy",
+            "side": "bid",
+            "state": "done",
+            "remaining_volume": "0",
+            "executed_volume": "100",
+            "executed_funds": "10000",
+            "paid_fee": "0",
+            "avg_price": "100",
+        }
+
+
+class PartialSellLiveAPI(FakeAPI):
+    def __init__(self):
+        self.order_reads = 0
+
+    def create_order(self, *args, **kwargs):
+        return {"uuid": "order-partial-sell"}
+
+    def accounts(self):
+        if self.order_reads <= 1:
+            return [
+                {"currency": "KRW", "balance": "1000000", "locked": "0"},
+                {"currency": "BTC", "balance": "60", "locked": "0", "avg_buy_price": "100"},
+            ]
+        return [
+            {"currency": "KRW", "balance": "1011000", "locked": "0"},
+        ]
+
+    def get_order(self, uuid=None, identifier=None):
+        self.order_reads += 1
+        if self.order_reads == 1:
+            return {
+                "uuid": uuid or "order-partial-sell",
+                "side": "ask",
+                "state": "wait",
+                "remaining_volume": "60",
+                "executed_volume": "40",
+                "executed_funds": "4400",
+                "paid_fee": "0",
+                "avg_price": "110",
+            }
+        return {
+            "uuid": uuid or "order-partial-sell",
+            "side": "ask",
+            "state": "done",
+            "remaining_volume": "0",
+            "executed_volume": "100",
+            "executed_funds": "11000",
+            "paid_fee": "0",
+            "avg_price": "110",
+        }
+
+
 class LookupFailureAPI(FakeAPI):
     def get_order(self, uuid=None, identifier=None):
         raise RuntimeError("lookup failed")
@@ -215,6 +300,82 @@ def test_live_pending_order_reconciles_on_next_cycle(monkeypatch):
     monitor.run_cycle([])
     assert not monitor.pending_orders
     assert monitor.trader.has_position("KRW-BTC")
+
+
+def test_live_partial_buy_fill_applies_only_remaining_delta(monkeypatch):
+    monkeypatch.setenv("UPBIT_LIVE", "1")
+    api = PartialBuyLiveAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        risk_limits={"max_trade_krw": 10000},
+        max_open=2,
+        min_fetch_seconds=0,
+        per_request_sleep=0,
+        live_orders=True,
+        reconcile_timeout_seconds=0.01,
+    )
+
+    frames = [_signal_frame(buy=True, close=100.0)]
+
+    def fake_build_frame(self, market):
+        return frames.pop(0)
+
+    monitor._build_frame = MethodType(fake_build_frame, monitor)
+    monitor.process_market("KRW-BTC")
+
+    partial_position = monitor.trader.get_position("KRW-BTC")
+    assert partial_position is not None
+    assert partial_position.qty == 40.0
+    assert monitor.last_signal_state["KRW-BTC"]["sig"] == "BUY_PENDING"
+    assert len(monitor.trade_log) == 1
+
+    monitor.run_cycle([])
+
+    final_position = monitor.trader.get_position("KRW-BTC")
+    assert final_position is not None
+    assert final_position.qty == 100.0
+    assert not monitor.pending_orders
+    assert len(monitor.trade_log) == 2
+    assert float(monitor.metrics["daily_buy"]) == 10000.0
+
+
+def test_live_partial_sell_fill_applies_only_remaining_delta(monkeypatch):
+    monkeypatch.setenv("UPBIT_LIVE", "1")
+    api = PartialSellLiveAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        risk_limits={"max_trade_krw": 10000},
+        max_open=2,
+        min_fetch_seconds=0,
+        per_request_sleep=0,
+        live_orders=True,
+        reconcile_timeout_seconds=0.01,
+    )
+    monitor.trader.enter_long(market="KRW-BTC", price=100.0, cost=10000.0, strategy="research_trend", qty=100.0)
+    monitor.last_signal_state["KRW-BTC"] = {"sig": "BUY", "entry": 100.0}
+
+    frames = [_signal_frame(sell=True, close=110.0)]
+
+    def fake_build_frame(self, market):
+        return frames.pop(0)
+
+    monitor._build_frame = MethodType(fake_build_frame, monitor)
+    monitor.process_market("KRW-BTC")
+
+    partial_position = monitor.trader.get_position("KRW-BTC")
+    assert partial_position is not None
+    assert partial_position.qty == 60.0
+    assert monitor.last_signal_state["KRW-BTC"]["sig"] == "SELL_PENDING"
+    assert len(monitor.trade_log) == 1
+
+    monitor.run_cycle([])
+
+    assert not monitor.trader.has_position("KRW-BTC")
+    assert not monitor.pending_orders
+    assert len(monitor.trade_log) == 2
+    assert float(monitor.metrics["realized_pnl"]) == 1000.0
 
 
 def test_live_lookup_failure_stays_pending():

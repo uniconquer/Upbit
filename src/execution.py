@@ -43,29 +43,62 @@ def wait_for_order_completion(
 def extract_fill_metrics(
     order: Mapping[str, Any] | None,
     *,
+    side: str | None = None,
     fallback_price: float,
     fallback_cost: float | None = None,
     fallback_qty: float | None = None,
 ) -> dict[str, Any]:
-    order = dict(order or {})
-    executed_qty = _to_float(order.get("executed_volume")) or _to_float(fallback_qty)
-    executed_cost = _to_float(order.get("executed_fund")) or _to_float(fallback_cost)
-    average_price = fallback_price
-    if executed_qty > 0 and executed_cost > 0:
-        average_price = executed_cost / executed_qty
-    elif executed_qty > 0 and average_price > 0 and executed_cost <= 0:
-        executed_cost = average_price * executed_qty
-    elif executed_cost > 0 and average_price > 0 and executed_qty <= 0:
-        executed_qty = executed_cost / average_price
+    raw_order = dict(order or {})
+    order_side = str(raw_order.get("side") or side or "").lower()
+    executed_qty = _to_float(raw_order.get("executed_volume")) or _to_float(fallback_qty)
+    gross_value = _to_float(raw_order.get("executed_funds"))
+    if gross_value <= 0:
+        gross_value = _to_float(raw_order.get("executed_fund"))
+    paid_fee = _to_float(raw_order.get("paid_fee"))
+    market_price = _to_float(raw_order.get("avg_price")) or fallback_price
+    can_estimate_fill = bool(raw_order.get("simulate")) or not raw_order or not str(raw_order.get("state") or "").strip()
+
+    if executed_qty > 0 and gross_value > 0 and market_price <= 0:
+        market_price = gross_value / executed_qty
+
+    if executed_qty <= 0 and can_estimate_fill and order_side in {"bid", "buy"} and fallback_cost and fallback_price > 0:
+        executed_qty = _to_float(fallback_cost) / fallback_price
+    elif executed_qty <= 0 and can_estimate_fill and order_side in {"ask", "sell"} and fallback_qty:
+        executed_qty = _to_float(fallback_qty)
+
+    if gross_value <= 0 and can_estimate_fill and fallback_cost:
+        gross_value = _to_float(fallback_cost)
+    elif gross_value <= 0 and order_side in {"ask", "sell"} and executed_qty > 0 and fallback_price > 0:
+        gross_value = executed_qty * fallback_price
+
+    if order_side in {"bid", "buy"}:
+        net_value = gross_value + paid_fee if gross_value > 0 else _to_float(fallback_cost)
+    elif order_side in {"ask", "sell"}:
+        net_value = max(gross_value - paid_fee, 0.0) if gross_value > 0 else _to_float(fallback_cost)
+    else:
+        net_value = gross_value or _to_float(fallback_cost)
+
+    effective_price = market_price
+    if executed_qty > 0 and net_value > 0:
+        effective_price = net_value / executed_qty
+
+    if executed_qty > 0 and gross_value <= 0 and effective_price > 0:
+        gross_value = effective_price * executed_qty
+        net_value = gross_value
 
     return {
-        "order_uuid": order.get("uuid"),
-        "order_state": order.get("state"),
-        "price": average_price,
+        "order_uuid": raw_order.get("uuid"),
+        "order_state": raw_order.get("state"),
+        "side": order_side,
+        "price": effective_price,
+        "market_price": market_price,
         "qty": executed_qty,
-        "cost": executed_cost,
-        "remaining_volume": _to_float(order.get("remaining_volume")),
-        "raw_order": order,
+        "value": gross_value,
+        "net_value": net_value,
+        "cost": net_value,
+        "paid_fee": paid_fee,
+        "remaining_volume": _to_float(raw_order.get("remaining_volume")),
+        "raw_order": raw_order,
     }
 
 
@@ -74,6 +107,7 @@ def resolve_submitted_order(
     order_result: Mapping[str, Any] | None,
     *,
     live_orders: bool,
+    side: str | None = None,
     fallback_price: float,
     fallback_cost: float | None = None,
     fallback_qty: float | None = None,
@@ -88,6 +122,7 @@ def resolve_submitted_order(
             "status_code": raw_result.get("status_code"),
             "fill": extract_fill_metrics(
                 None,
+                side=side,
                 fallback_price=fallback_price,
                 fallback_cost=fallback_cost,
                 fallback_qty=fallback_qty,
@@ -97,6 +132,7 @@ def resolve_submitted_order(
 
     resolved_order = raw_result
     order_uuid = raw_result.get("uuid")
+    resolved_side = str(raw_result.get("side") or side or "").lower()
     if live_orders and order_uuid:
         try:
             resolved_order = (
@@ -114,6 +150,7 @@ def resolve_submitted_order(
 
     fill = extract_fill_metrics(
         resolved_order,
+        side=resolved_side,
         fallback_price=fallback_price,
         fallback_cost=fallback_cost,
         fallback_qty=fallback_qty,
@@ -149,16 +186,62 @@ def build_pending_order(
     requested_qty: float | None = None,
     reason: str = "signal",
     submitted_at: float | None = None,
+    fill: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_result = dict(order_result or {})
+    fill = dict(fill or {})
     return {
         "market": market,
         "side": side,
         "strategy": strategy,
         "reason": reason,
         "uuid": raw_result.get("uuid"),
-        "fallback_price": float(fallback_price),
+        "fallback_price": float(fill.get("market_price") or fallback_price),
         "requested_cost": float(requested_cost) if requested_cost is not None else None,
         "requested_qty": float(requested_qty) if requested_qty is not None else None,
         "submitted_at": float(submitted_at or time.time()),
+        "filled_qty": _to_float(fill.get("qty")),
+        "filled_value": _to_float(fill.get("value")),
+        "filled_net_value": _to_float(fill.get("net_value")),
+        "filled_fee": _to_float(fill.get("paid_fee")),
+    }
+
+
+def pending_fill_delta(
+    pending_order: Mapping[str, Any],
+    fill: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, float]]:
+    updated = dict(pending_order or {})
+    fill = dict(fill or {})
+
+    previous_qty = _to_float(updated.get("filled_qty"))
+    previous_value = _to_float(updated.get("filled_value"))
+    previous_net_value = _to_float(updated.get("filled_net_value"))
+    previous_fee = _to_float(updated.get("filled_fee"))
+
+    total_qty = max(_to_float(fill.get("qty")), previous_qty)
+    total_value = max(_to_float(fill.get("value")), previous_value)
+    total_net_value = max(_to_float(fill.get("net_value")), previous_net_value)
+    total_fee = max(_to_float(fill.get("paid_fee")), previous_fee)
+
+    updated["filled_qty"] = total_qty
+    updated["filled_value"] = total_value
+    updated["filled_net_value"] = total_net_value
+    updated["filled_fee"] = total_fee
+    updated["fallback_price"] = float(fill.get("market_price") or updated.get("fallback_price") or 0.0)
+
+    delta_qty = max(total_qty - previous_qty, 0.0)
+    delta_value = max(total_value - previous_value, 0.0)
+    delta_net_value = max(total_net_value - previous_net_value, 0.0)
+    delta_fee = max(total_fee - previous_fee, 0.0)
+    delta_market_price = (delta_value / delta_qty) if delta_qty > 0 and delta_value > 0 else _to_float(fill.get("market_price"))
+    delta_effective_price = (delta_net_value / delta_qty) if delta_qty > 0 and delta_net_value > 0 else _to_float(fill.get("price"))
+
+    return updated, {
+        "qty": delta_qty,
+        "value": delta_value,
+        "net_value": delta_net_value,
+        "paid_fee": delta_fee,
+        "market_price": delta_market_price,
+        "price": delta_effective_price,
     }

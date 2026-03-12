@@ -6,9 +6,9 @@ import time
 from typing import Any, Mapping
 
 try:
-    from execution import build_pending_order
+    from execution import build_pending_order, extract_fill_metrics
 except ImportError:
-    from src.execution import build_pending_order
+    from src.execution import build_pending_order, extract_fill_metrics
 
 
 def _to_float(value: Any) -> float:
@@ -43,7 +43,6 @@ def positions_from_accounts(
         existing = dict(existing_positions.get(market) or {})
         entry = _to_float(account.get("avg_buy_price")) or _to_float(existing.get("entry"))
         if entry <= 0 and not existing:
-            # Skip manual deposits or assets without an exchange average price.
             continue
 
         positions[market] = {
@@ -102,6 +101,13 @@ def pending_orders_from_open_orders(
             requested_qty = remaining_volume or (_to_float(prev.get("requested_qty")) or None)
             fallback_price = fallback_price or limit_price
 
+        fill = extract_fill_metrics(
+            order,
+            side=side,
+            fallback_price=fallback_price or limit_price,
+            fallback_cost=requested_cost,
+            fallback_qty=requested_qty,
+        )
         pending_orders[market] = build_pending_order(
             market=market,
             side=side,
@@ -112,6 +118,7 @@ def pending_orders_from_open_orders(
             requested_qty=requested_qty,
             reason=str(prev.get("reason") or "exchange_open_order"),
             submitted_at=_to_float(prev.get("submitted_at")) or time.time(),
+            fill=fill,
         )
     return pending_orders
 
@@ -166,7 +173,7 @@ def sync_exchange_state(
         )
         accounts_ok = True
     except Exception as exc:
-        notifications.append(f"[실거래] 거래소 잔고 동기화에 실패했습니다: {exc}")
+        notifications.append(f"[\uc2e4\uac70\ub798] \uac70\ub798\uc18c \uc794\uace0 \ub3d9\uae30\ud654\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4: {exc}")
 
     try:
         open_orders = api.open_orders(states=["wait", "watch"])
@@ -181,11 +188,11 @@ def sync_exchange_state(
             pending_orders = mapped_pending_orders
         orders_ok = True
     except Exception as exc:
-        notifications.append(f"[실거래] 미체결 주문 동기화에 실패했습니다: {exc}")
+        notifications.append(f"[\uc2e4\uac70\ub798] \ubbf8\uccb4\uacb0 \uc8fc\ubb38 \ub3d9\uae30\ud654\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4: {exc}")
 
     if accounts_ok and orders_ok:
         notifications.append(
-            f"[실거래] 거래소 상태 동기화 완료: 보유 포지션 {len(positions)}개, 미체결 주문 {len(pending_orders)}건"
+            f"[\uc2e4\uac70\ub798] \uac70\ub798\uc18c \uc0c1\ud0dc \ub3d9\uae30\ud654 \uc644\ub8cc: \ubcf4\uc720 \ud3ec\uc9c0\uc158 {len(positions)}\uac1c, \ubbf8\uccb4\uacb0 \uc8fc\ubb38 {len(pending_orders)}\uac74"
         )
 
     return {
