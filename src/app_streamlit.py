@@ -42,16 +42,16 @@ live_init(api, flux_indicator)
 
 with st.sidebar:
     st.title("Upbit Studio")
-    st.caption("Research, simulate, then go live carefully.")
+    st.caption("연구하고, 모의로 검증하고, 안전장치 아래에서만 실거래로 넘어가세요.")
     view = st.radio(
-        "Workspace",
+        "작업 공간",
         ["account", "backtest", "live"],
         index=["account", "backtest", "live"].index(st.session_state.get("view", "account")),
         key="view",
         format_func=lambda value: {
-            "account": "Account",
-            "backtest": "Backtest Lab",
-            "live": "Live Desk",
+            "account": "내 자산",
+            "backtest": "백테스트 랩",
+            "live": "라이브 데스크",
         }[value],
     )
     live_flag = "ON" if os.getenv("UPBIT_LIVE") == "1" else "OFF"

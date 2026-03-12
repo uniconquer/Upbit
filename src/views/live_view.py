@@ -31,7 +31,7 @@ from paper_trader import PaperTrader
 from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
 from runtime_store import load_runtime_state, save_runtime_state
 from strategy import backtest_signal_frame
-from strategy_engine import build_strategy_frame, strategy_label, strategy_options
+from strategy_engine import build_strategy_frame, strategy_description, strategy_label, strategy_options
 from trading_costs import TradingCostModel, cost_model_from_values
 from ui_theme import apply_chart_theme, page_intro
 from upbit_api import UpbitAPI
@@ -87,6 +87,203 @@ LIVE_RISK_WIDGETS = {
     "daily_loss_limit_pct": "live_daily_loss_limit_pct",
     "include_unrealized_loss": "live_include_unrealized_loss",
 }
+
+_INTERVAL_LABELS = {
+    "minute15": "15분",
+    "minute30": "30분",
+    "minute60": "60분",
+    "minute240": "240분",
+    "day": "일봉",
+}
+
+_SERIES_LABELS = {
+    "ema_fast": "빠른 EMA",
+    "ema_slow": "느린 EMA",
+    "atr_stop": "ATR 손절선",
+    "breakout_high": "돌파 기준선",
+    "breakdown_low": "이탈 기준선",
+    "adx": "ADX 추세 강도",
+    "strategy_score": "전략 점수",
+    "ltf_upper": "단기 상단 밴드",
+    "ltf_lower": "단기 하단 밴드",
+    "ltf_basis": "단기 기준선",
+    "htf_upper": "상위 상단 밴드",
+    "htf_lower": "상위 하단 밴드",
+}
+
+
+def _signal_text(signal: str | None) -> str:
+    mapping = {
+        "BUY": "매수",
+        "SELL": "매도",
+        "WAIT": "대기",
+        "BUY_PENDING": "매수 대기",
+        "SELL_PENDING": "매도 대기",
+    }
+    return mapping.get(str(signal or "").upper(), str(signal or "-"))
+
+
+def _position_text(value: str | None) -> str:
+    mapping = {
+        "OPEN": "보유중",
+        "PENDING": "주문 대기",
+        "-": "-",
+    }
+    return mapping.get(str(value or "-"), str(value or "-"))
+
+
+def _interval_text(value: str) -> str:
+    return _INTERVAL_LABELS.get(value, value)
+
+
+def _mode_text(value: str | None) -> str:
+    mapping = {
+        "LIVE": "실거래",
+        "SIM": "모의",
+        "ON": "켜짐",
+        "OFF": "꺼짐",
+    }
+    return mapping.get(str(value or "").upper(), str(value or "-"))
+
+
+def _reason_text(value: str | None) -> str:
+    mapping = {
+        "signal": "신호",
+        "reconcile": "주문 동기화",
+        "manual": "수동",
+        "risk": "리스크 차단",
+        "kill_switch": "긴급중지",
+        "timeout": "시간 초과",
+    }
+    return mapping.get(str(value or ""), str(value or "-"))
+
+
+def _format_pct(value: object, digits: int = 2) -> str:
+    try:
+        return f"{float(value):.{digits}f}%"
+    except Exception:
+        return "-"
+
+
+def _format_money(value: object, digits: int = 0) -> str:
+    try:
+        return fmt_full_number(float(value), digits)
+    except Exception:
+        return "-"
+
+
+def _trade_events_for_market(trade_log: list[dict[str, object]], market: str) -> list[dict[str, object]]:
+    points: list[dict[str, object]] = []
+    for trade in trade_log:
+        if str(trade.get("market") or "") != market:
+            continue
+        try:
+            ts = float(trade.get("ts") or 0.0)
+            price = float(trade.get("price") or 0.0)
+        except Exception:
+            continue
+        if ts <= 0 or price <= 0:
+            continue
+        points.append(
+            {
+                "ts": pd.to_datetime(ts, unit="s"),
+                "price": price,
+                "side": str(trade.get("side") or "").upper(),
+                "qty": float(trade.get("qty") or 0.0),
+            }
+        )
+    return points
+
+
+def _present_leaderboard(table: pd.DataFrame) -> pd.DataFrame:
+    visible = table.copy()
+    if "price" in visible.columns:
+        visible["price"] = visible["price"].apply(_format_money)
+    if "score" in visible.columns:
+        visible["score"] = visible["score"].apply(lambda value: f"{float(value):.2f}" if pd.notna(value) else "-")
+    if "trades" in visible.columns:
+        visible["trades"] = visible["trades"].apply(lambda value: int(value) if pd.notna(value) else 0)
+    for column in ["return_pct", "win_rate_pct", "max_drawdown_pct"]:
+        if column in visible.columns:
+            visible[column] = visible[column].apply(_format_pct)
+    if "last_signal" in visible.columns:
+        visible["last_signal"] = visible["last_signal"].apply(_signal_text)
+    if "position" in visible.columns:
+        visible["position"] = visible["position"].apply(_position_text)
+    ordered = [column for column in ["market", "price", "score", "trades", "return_pct", "win_rate_pct", "max_drawdown_pct", "last_signal", "position"] if column in visible.columns]
+    return visible[ordered].rename(
+        columns={
+            "market": "종목",
+            "price": "현재가",
+            "score": "전략 점수",
+            "trades": "백테스트 거래 수",
+            "return_pct": "백테스트 수익률",
+            "win_rate_pct": "승률",
+            "max_drawdown_pct": "최대 낙폭",
+            "last_signal": "마지막 신호",
+            "position": "포지션 상태",
+        }
+    )
+
+
+def _present_positions(rows: list[dict[str, object]]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    for column in ["entry", "cost", "current_price", "pnl_value"]:
+        if column in frame.columns:
+            frame[column] = frame[column].apply(_format_money)
+    if "qty" in frame.columns:
+        frame["qty"] = frame["qty"].apply(lambda value: f"{float(value):.8f}" if pd.notna(value) else "-")
+    if "pnl_pct" in frame.columns:
+        frame["pnl_pct"] = frame["pnl_pct"].apply(_format_pct)
+    return frame.rename(
+        columns={
+            "market": "종목",
+            "qty": "수량",
+            "entry": "평균 진입가",
+            "cost": "매수 금액",
+            "current_price": "현재가",
+            "pnl_value": "평가손익",
+            "pnl_pct": "평가수익률",
+        }
+    )
+
+
+def _present_trade_log(logs: list[dict[str, object]]) -> pd.DataFrame:
+    if not logs:
+        return pd.DataFrame()
+    frame = pd.DataFrame(logs).sort_values("ts").tail(200)
+    frame["time"] = pd.to_datetime(frame["ts"], unit="s").dt.strftime("%H:%M:%S")
+    if "side" in frame.columns:
+        frame["side"] = frame["side"].apply(_signal_text)
+    if "strategy" in frame.columns:
+        frame["strategy"] = frame["strategy"].apply(strategy_label)
+    if "reason" in frame.columns:
+        frame["reason"] = frame["reason"].apply(_reason_text)
+    for column in ["price", "cost", "entry", "pnl_value"]:
+        if column in frame.columns:
+            frame[column] = frame[column].apply(_format_money)
+    if "qty" in frame.columns:
+        frame["qty"] = frame["qty"].apply(lambda value: f"{float(value):.8f}" if pd.notna(value) else "-")
+    if "pnl_pct" in frame.columns:
+        frame["pnl_pct"] = frame["pnl_pct"].apply(_format_pct)
+    preferred = [column for column in ["time", "market", "side", "price", "qty", "cost", "entry", "pnl_value", "pnl_pct", "reason", "strategy"] if column in frame.columns]
+    return frame[preferred].rename(
+        columns={
+            "time": "시간",
+            "market": "종목",
+            "side": "구분",
+            "price": "체결가",
+            "qty": "수량",
+            "cost": "체결 금액",
+            "entry": "평균 진입가",
+            "pnl_value": "손익",
+            "pnl_pct": "손익률",
+            "reason": "사유",
+            "strategy": "전략",
+        }
+    )
 
 
 def init_api(a: UpbitAPI, flux):
@@ -1048,38 +1245,50 @@ def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
     options = strategy_options(flux_indicator is not None)
     current = st.session_state.get(f"{prefix}_strategy_name", options[0])
     index = options.index(current) if current in options else 0
-    strategy_name = st.selectbox("Strategy", options, index=index, format_func=strategy_label, key=f"{prefix}_strategy_name")
+    strategy_name = st.selectbox("전략", options, index=index, format_func=strategy_label, key=f"{prefix}_strategy_name")
+    st.caption(strategy_description(strategy_name))
     params: dict[str, float | int | str] = {}
     if strategy_name == "research_trend":
-        with st.expander("Research Trend Parameters", expanded=False):
+        with st.expander("연구형 추세 돌파 설정", expanded=False):
             row1 = st.columns(4)
-            params["fast_ema"] = row1[0].number_input("Fast EMA", 5, 100, 21, 1, key=f"{prefix}_fast_ema")
-            params["slow_ema"] = row1[1].number_input("Slow EMA", 10, 240, 55, 1, key=f"{prefix}_slow_ema")
-            params["breakout_window"] = row1[2].number_input("Breakout Window", 5, 120, 20, 1, key=f"{prefix}_breakout")
-            params["exit_window"] = row1[3].number_input("Exit Window", 3, 80, 10, 1, key=f"{prefix}_exit")
+            params["fast_ema"] = row1[0].number_input("빠른 EMA", 5, 100, 21, 1, key=f"{prefix}_fast_ema")
+            params["slow_ema"] = row1[1].number_input("느린 EMA", 10, 240, 55, 1, key=f"{prefix}_slow_ema")
+            params["breakout_window"] = row1[2].number_input("돌파 창", 5, 120, 20, 1, key=f"{prefix}_breakout")
+            params["exit_window"] = row1[3].number_input("청산 창", 3, 80, 10, 1, key=f"{prefix}_exit")
             row2 = st.columns(4)
-            params["atr_window"] = row2[0].number_input("ATR Window", 5, 50, 14, 1, key=f"{prefix}_atr_window")
-            params["atr_mult"] = row2[1].number_input("ATR Mult", 1.0, 6.0, 2.5, 0.1, key=f"{prefix}_atr_mult")
-            params["adx_window"] = row2[2].number_input("ADX Window", 5, 50, 14, 1, key=f"{prefix}_adx_window")
-            params["adx_threshold"] = row2[3].number_input("ADX Threshold", 5.0, 40.0, 18.0, 0.5, key=f"{prefix}_adx_threshold")
+            params["atr_window"] = row2[0].number_input("ATR 창", 5, 50, 14, 1, key=f"{prefix}_atr_window")
+            params["atr_mult"] = row2[1].number_input("ATR 배수", 1.0, 6.0, 2.5, 0.1, key=f"{prefix}_atr_mult")
+            params["adx_window"] = row2[2].number_input("ADX 창", 5, 50, 14, 1, key=f"{prefix}_adx_window")
+            params["adx_threshold"] = row2[3].number_input("ADX 기준", 5.0, 40.0, 18.0, 0.5, key=f"{prefix}_adx_threshold")
             row3 = st.columns(3)
-            params["momentum_window"] = row3[0].number_input("Momentum Window", 5, 80, 20, 1, key=f"{prefix}_momentum")
-            params["volume_window"] = row3[1].number_input("Volume Window", 5, 80, 20, 1, key=f"{prefix}_volume_window")
-            params["volume_threshold"] = row3[2].number_input("Volume Ratio", 0.1, 3.0, 0.9, 0.1, key=f"{prefix}_volume_threshold")
+            params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1, key=f"{prefix}_momentum")
+            params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1, key=f"{prefix}_volume_window")
+            params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key=f"{prefix}_volume_threshold")
     else:
-        with st.expander("Flux Parameters", expanded=False):
+        with st.expander("플럭스 추세 밴드 설정", expanded=False):
             row = st.columns(5)
-            params["ltf_len"] = row[0].number_input("LTF Len", 5, 400, 20, 1, key=f"{prefix}_ltf_len")
-            params["ltf_mult"] = row[1].number_input("LTF Mult", 0.1, 10.0, 2.0, 0.1, key=f"{prefix}_ltf_mult")
-            params["htf_len"] = row[2].number_input("HTF Len", 5, 400, 20, 1, key=f"{prefix}_htf_len")
-            params["htf_mult"] = row[3].number_input("HTF Mult", 0.1, 10.0, 2.25, 0.1, key=f"{prefix}_htf_mult")
-            htf = row[4].selectbox("HTF Rule", ["30m", "60m", "120m", "240m", "1D"], index=1, key=f"{prefix}_htf_rule")
+            params["ltf_len"] = row[0].number_input("단기 기준 길이", 5, 400, 20, 1, key=f"{prefix}_ltf_len")
+            params["ltf_mult"] = row[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1, key=f"{prefix}_ltf_mult")
+            params["htf_len"] = row[2].number_input("상위 주기 길이", 5, 400, 20, 1, key=f"{prefix}_htf_len")
+            params["htf_mult"] = row[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1, key=f"{prefix}_htf_mult")
+            htf = row[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1, key=f"{prefix}_htf_rule")
             params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
     return strategy_name, params
 
 
-def _render_chart(frame: pd.DataFrame, strategy_name: str, bt: dict[str, object]):
-    figure = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.64, 0.18, 0.18], vertical_spacing=0.03)
+def _render_chart(
+    frame: pd.DataFrame,
+    strategy_name: str,
+    bt: dict[str, object],
+    *,
+    trade_log: list[dict[str, object]] | None = None,
+    market: str | None = None,
+    position: dict[str, object] | None = None,
+):
+    is_research = strategy_name == "research_trend"
+    rows = 4 if is_research else 3
+    row_heights = [0.56, 0.16, 0.14, 0.14] if is_research else [0.64, 0.18, 0.18]
+    figure = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=row_heights, vertical_spacing=0.03)
     figure.add_trace(
         go.Candlestick(
             x=frame.index,
@@ -1089,81 +1298,167 @@ def _render_chart(frame: pd.DataFrame, strategy_name: str, bt: dict[str, object]
             close=frame["close"],
             increasing_line_color="#22c55e",
             decreasing_line_color="#f43f5e",
-            name="Price",
+            name="가격",
         ),
         row=1,
         col=1,
     )
-    if strategy_name == "research_trend":
-        for column, color in [("ema_fast", "#60a5fa"), ("ema_slow", "#f59e0b"), ("atr_stop", "#f97316")]:
+
+    if is_research:
+        for column, color in [
+            ("ema_fast", "#60a5fa"),
+            ("ema_slow", "#f59e0b"),
+            ("atr_stop", "#f97316"),
+            ("breakout_high", "rgba(45, 212, 191, 0.40)"),
+            ("breakdown_low", "rgba(251, 113, 133, 0.30)"),
+        ]:
             if column in frame:
-                figure.add_trace(go.Scatter(x=frame.index, y=frame[column], name=column, line={"color": color, "width": 1.5}), row=1, col=1)
-        figure.add_trace(go.Scatter(x=frame.index, y=frame["adx"], name="ADX", line={"color": "#a78bfa"}), row=2, col=1)
-        figure.add_hline(y=18, line={"color": "rgba(255,255,255,0.16)", "dash": "dot"}, row=2, col=1)
-        figure.add_trace(go.Scatter(x=frame.index, y=frame["strategy_score"], name="Score", line={"color": "#2dd4bf"}), row=3, col=1)
+                figure.add_trace(
+                    go.Scatter(
+                        x=frame.index,
+                        y=frame[column],
+                        name=_SERIES_LABELS.get(column, column),
+                        line={"color": color, "width": 1.5},
+                    ),
+                    row=1,
+                    col=1,
+                )
+        if "adx" in frame:
+            figure.add_trace(
+                go.Scatter(x=frame.index, y=frame["adx"], name=_SERIES_LABELS["adx"], line={"color": "#a78bfa"}),
+                row=3,
+                col=1,
+            )
+            figure.add_hline(y=18, line={"color": "rgba(255,255,255,0.16)", "dash": "dot"}, row=3, col=1)
+        if "strategy_score" in frame:
+            figure.add_trace(
+                go.Scatter(x=frame.index, y=frame["strategy_score"], name=_SERIES_LABELS["strategy_score"], line={"color": "#2dd4bf"}),
+                row=4,
+                col=1,
+            )
     else:
         for column in ["ltf_upper", "ltf_lower", "ltf_basis", "htf_upper", "htf_lower"]:
             if column in frame:
-                figure.add_trace(go.Scatter(x=frame.index, y=frame[column], name=column, line={"width": 1.2}), row=1, col=1)
-        figure.add_trace(go.Bar(x=frame.index, y=frame["volume"], name="Volume", marker_color="rgba(96,165,250,0.5)"), row=3, col=1)
-    for column, color in [("buy_signal", "#22c55e"), ("sell_signal", "#f43f5e")]:
+                figure.add_trace(
+                    go.Scatter(x=frame.index, y=frame[column], name=_SERIES_LABELS.get(column, column), line={"width": 1.2}),
+                    row=1,
+                    col=1,
+                )
+        figure.add_trace(go.Bar(x=frame.index, y=frame["volume"], name="거래량", marker_color="rgba(96,165,250,0.5)"), row=3, col=1)
+
+    for column, color, symbol, label in [
+        ("buy_signal", "#22c55e", "triangle-up-open", "매수 신호"),
+        ("sell_signal", "#f43f5e", "triangle-down-open", "매도 신호"),
+    ]:
         if column in frame:
             hits = frame[frame[column]]
             if not hits.empty:
-                figure.add_trace(go.Scatter(x=hits.index, y=hits["close"], mode="markers", name=column, marker={"size": 11, "color": color, "line": {"color": "white", "width": 1}}), row=1, col=1)
+                figure.add_trace(
+                    go.Scatter(
+                        x=hits.index,
+                        y=hits["close"],
+                        mode="markers",
+                        name=label,
+                        marker={"symbol": symbol, "size": 13, "color": color, "line": {"color": "white", "width": 1.4}},
+                        hovertemplate="%{x}<br>가격=%{y:.0f}<extra></extra>",
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+    if market and trade_log:
+        actual_events = _trade_events_for_market(trade_log, market)
+        for side, color, label in [
+            ("BUY", "#22c55e", "실제 매수"),
+            ("SELL", "#f43f5e", "실제 매도"),
+        ]:
+            points = [event for event in actual_events if event["side"] == side]
+            if points:
+                figure.add_trace(
+                    go.Scatter(
+                        x=[event["ts"] for event in points],
+                        y=[event["price"] for event in points],
+                        mode="markers",
+                        name=label,
+                        marker={"symbol": "diamond", "size": 12, "color": color, "line": {"color": "#0f172a", "width": 1.3}},
+                        hovertemplate="%{x}<br>체결가=%{y:.0f}<extra></extra>",
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+    entry_price = float((position or {}).get("entry") or 0.0)
+    if entry_price > 0:
+        figure.add_hline(
+            y=entry_price,
+            line={"color": "rgba(250, 204, 21, 0.75)", "dash": "dash"},
+            annotation_text="보유 평균 진입가",
+            annotation_position="top left",
+            row=1,
+            col=1,
+        )
+
     equity = bt.get("equity")
     if equity is not None:
-        figure.add_trace(go.Scatter(x=equity.index, y=equity.values, name="Equity", line={"color": "#f8fafc"}), row=2, col=1)
-    return apply_chart_theme(figure, height=840)
+        figure.add_trace(go.Scatter(x=equity.index, y=equity.values, name="누적 수익곡선", line={"color": "#f8fafc"}), row=2, col=1)
+    figure.update_yaxes(title_text="가격", row=1, col=1)
+    figure.update_yaxes(title_text="수익곡선", row=2, col=1)
+    if is_research:
+        figure.update_yaxes(title_text="ADX", row=3, col=1)
+        figure.update_yaxes(title_text="점수", row=4, col=1)
+    else:
+        figure.update_yaxes(title_text="거래량", row=3, col=1)
+    return apply_chart_theme(figure, height=920 if is_research else 860)
 
 
 def render_live():
     page_intro(
-        "Live Desk",
-        "Refactored live simulation with guarded execution",
-        "The live desk now uses shared strategy, risk, and paper-trading modules. Real orders still stay behind both the environment gate and an explicit UI confirmation.",
+        "라이브",
+        "실시간 감시와 자동 실행 데스크",
+        "빈 삼각형은 전략 신호, 다이아몬드는 실제 체결입니다. 실거래 주문은 환경변수와 화면 확인을 모두 통과해야만 활성화됩니다.",
     )
     if not api:
-        st.error("API is not initialized.")
+        st.error("API가 초기화되지 않았습니다.")
         return
     _hydrate_live_runtime()
 
     controls = st.columns([1, 1, 1, 1, 1, 1])
-    interval = controls[0].selectbox("Interval", ["minute15", "minute30", "minute60", "minute240", "day"], index=1, key="live_interval")
-    count = int(controls[1].number_input("Candles", 120, 1200, 360, 20, key="live_count"))
-    topn = int(controls[2].number_input("Top Markets", 5, 60, 20, 1, key="live_topn"))
-    fee = float(controls[3].number_input("Fee", 0.0, 0.01, 0.0005, 0.0001, format="%.4f", key="live_fee"))
-    slippage_bps = float(controls[4].number_input("Slippage (bps)", 0.0, 100.0, 3.0, 0.5, key="live_slippage_bps"))
-    auto = controls[5].checkbox("Auto sync", value=True, key="live_auto")
+    interval_options = ["minute15", "minute30", "minute60", "minute240", "day"]
+    interval = controls[0].selectbox("주기", interval_options, index=1, format_func=_interval_text, key="live_interval")
+    count = int(controls[1].number_input("캔들 수", 120, 1200, 360, 20, key="live_count"))
+    topn = int(controls[2].number_input("상위 종목 수", 5, 60, 20, 1, key="live_topn"))
+    fee = float(controls[3].number_input("수수료", 0.0, 0.01, 0.0005, 0.0001, format="%.4f", key="live_fee"))
+    slippage_bps = float(controls[4].number_input("슬리피지 (bps)", 0.0, 100.0, 3.0, 0.5, key="live_slippage_bps"))
+    auto = controls[5].checkbox("값 변경 시 자동 동기화", value=True, key="live_auto")
     strategy_name, strategy_params = _strategy_controls("live")
 
-    with st.expander("Live Trading Guard", expanded=False):
+    with st.expander("실거래 안전장치", expanded=False):
         guard_cols = st.columns([1, 1, 1.2])
-        live_toggle = guard_cols[0].checkbox("Enable live orders", value=st.session_state.get("LIVE_TRADING_RAW", False))
-        confirm_text = guard_cols[1].text_input("Type LIVE", value=st.session_state.get("LIVE_TRADING_CONFIRM", ""))
+        live_toggle = guard_cols[0].checkbox("실거래 주문 허용", value=st.session_state.get("LIVE_TRADING_RAW", False))
+        confirm_text = guard_cols[1].text_input("확인 문구 입력 (LIVE)", value=st.session_state.get("LIVE_TRADING_CONFIRM", ""))
         env_live = os.getenv("UPBIT_LIVE") == "1"
         live_trading = bool(env_live and live_toggle and confirm_text.strip().upper() == "LIVE")
         st.session_state["LIVE_TRADING_RAW"] = live_toggle
         st.session_state["LIVE_TRADING_CONFIRM"] = confirm_text
         st.session_state["LIVE_TRADING"] = live_trading
         if not env_live:
-            st.info("Environment gate is closed. Set UPBIT_LIVE=1 before any real order can be sent.")
+            st.info("환경변수 잠금이 걸려 있습니다. 실제 주문을 보내려면 `UPBIT_LIVE=1` 이 먼저 필요합니다.")
         elif live_toggle and confirm_text.strip().upper() != "LIVE":
-            st.warning("The confirmation word must be LIVE before execution is armed.")
+            st.warning("실거래를 활성화하려면 확인 문구에 `LIVE` 를 정확히 입력해야 합니다.")
         elif live_trading:
-            st.success("Live order execution is armed.")
+            st.success("실거래 주문 준비가 완료되었습니다.")
 
     kill_state = load_kill_switch(LIVE_KILL_SWITCH_NAME)
-    with st.expander("Emergency Stop", expanded=bool(kill_state.get("enabled"))):
+    with st.expander("긴급중지", expanded=bool(kill_state.get("enabled"))):
         kill_cols = st.columns([1, 1, 2.2])
         kill_reason = kill_cols[2].text_input(
-            "Reason",
+            "중지 사유",
             value=str(kill_state.get("reason") or ""),
             key="live_kill_switch_reason",
             placeholder="예: 이상 체결 감지, 수동 점검",
         )
-        enable_kill = kill_cols[0].button("Enable Stop", use_container_width=True)
-        disable_kill = kill_cols[1].button("Resume Trading", use_container_width=True)
+        enable_kill = kill_cols[0].button("중지 켜기", use_container_width=True)
+        disable_kill = kill_cols[1].button("거래 재개", use_container_width=True)
         if enable_kill:
             kill_state = save_kill_switch(
                 LIVE_KILL_SWITCH_NAME,
@@ -1186,16 +1481,16 @@ def render_live():
     else:
         st.caption("긴급중지가 비활성화되어 있습니다. 필요하면 위 패널에서 즉시 차단할 수 있습니다.")
 
-    with st.expander("Risk Limits", expanded=False):
+    with st.expander("리스크 제한", expanded=False):
         row1 = st.columns(3)
-        max_trade_krw = float(row1[0].number_input("Max trade KRW", 0, 10_000_000_000, 50000, 10000, format="%d", key="live_max_trade_krw"))
-        max_trade_pct = float(row1[1].number_input("Max trade %", 0.0, 100.0, 2.0, 0.5, format="%.1f", key="live_max_trade_pct"))
-        per_asset_max_pct = float(row1[2].number_input("Max asset %", 0.0, 100.0, 10.0, 0.5, format="%.1f", key="live_per_asset_max_pct"))
+        max_trade_krw = float(row1[0].number_input("1회 최대 주문금액 (KRW)", 0, 10_000_000_000, 50000, 10000, format="%d", key="live_max_trade_krw"))
+        max_trade_pct = float(row1[1].number_input("1회 최대 주문비중 (%)", 0.0, 100.0, 2.0, 0.5, format="%.1f", key="live_max_trade_pct"))
+        per_asset_max_pct = float(row1[2].number_input("종목당 최대 비중 (%)", 0.0, 100.0, 10.0, 0.5, format="%.1f", key="live_per_asset_max_pct"))
         row2 = st.columns(3)
-        daily_buy_limit = float(row2[0].number_input("Daily buy KRW", 0, 10_000_000_000, 200000, 50000, format="%d", key="live_daily_buy_limit"))
-        daily_loss_limit_krw = float(row2[1].number_input("Daily loss KRW", 0, 10_000_000_000, 30000, 10000, format="%d", key="live_daily_loss_limit_krw"))
-        daily_loss_limit_pct = float(row2[2].number_input("Daily loss %", 0.0, 100.0, 3.0, 0.5, format="%.1f", key="live_daily_loss_limit_pct"))
-        include_unrealized = st.checkbox("Include unrealized loss in daily stop", value=True, key="live_include_unrealized_loss")
+        daily_buy_limit = float(row2[0].number_input("일일 총 매수한도 (KRW)", 0, 10_000_000_000, 200000, 50000, format="%d", key="live_daily_buy_limit"))
+        daily_loss_limit_krw = float(row2[1].number_input("일일 손실한도 (KRW)", 0, 10_000_000_000, 30000, 10000, format="%d", key="live_daily_loss_limit_krw"))
+        daily_loss_limit_pct = float(row2[2].number_input("일일 손실한도 (%)", 0.0, 100.0, 3.0, 0.5, format="%.1f", key="live_daily_loss_limit_pct"))
+        include_unrealized = st.checkbox("미실현 손실도 일일 손절에 포함", value=True, key="live_include_unrealized_loss")
         risk_limits = {
             "max_trade_krw": max_trade_krw,
             "max_trade_pct": max_trade_pct,
@@ -1222,12 +1517,12 @@ def render_live():
     params["worker_interval"] = int(st.session_state.get("live_worker_interval", 30) or 30)
     managed_worker_config = _managed_worker_config_from_live_params(params)
 
-    with st.expander("How Execution Works", expanded=False):
+    with st.expander("실행 방식 안내", expanded=False):
         st.markdown(
             "\n".join(
                 [
-                    "- `Start Worker`: 현재 브라우저 세션 안에서만 도는 페이지 전용 워커입니다. 페이지를 닫거나 앱이 내려가면 멈춥니다.",
-                    "- `Start Background Worker`: 별도 Python 프로세스로 도는 CLI 워커입니다. 텔레그램 제어와 같은 워커를 바라봅니다.",
+                    "- `페이지 워커 시작`: 현재 브라우저 세션 안에서만 도는 페이지 전용 워커입니다. 페이지를 닫거나 앱이 내려가면 멈춥니다.",
+                    "- `백그라운드 워커 시작`: 별도 Python 프로세스로 도는 CLI 워커입니다. 텔레그램 제어와 같은 워커를 바라봅니다.",
                     "- `telegram-control`: 텔레그램으로 명령을 받는 별도 봇 프로세스입니다. 이 프로세스가 켜져 있어야 `/status`, `/start_worker` 같은 명령이 동작합니다.",
                     "- 현재 텔레그램은 기본적으로 알림 발송용이고, 제어 명령은 `telegram-control`을 실행했을 때만 활성화됩니다.",
                 ]
@@ -1241,20 +1536,20 @@ def render_live():
         )
 
     managed_status = load_managed_worker_status()
-    with st.expander("Background CLI Worker (Telegram / Automation)", expanded=bool(managed_status.get("running"))):
+    with st.expander("백그라운드 CLI 워커 (텔레그램 / 자동화)", expanded=bool(managed_status.get("running"))):
         status_cols = st.columns(6)
-        status_cols[0].metric("Running", "ON" if managed_status.get("running") else "OFF")
-        status_cols[1].metric("Mode", str(managed_status.get("mode") or "-"))
-        status_cols[2].metric("Markets", int(managed_status.get("config", {}).get("markets") or 0))
-        status_cols[3].metric("Loop", f"{int(managed_status.get('config', {}).get('loop_seconds') or 0)}s")
-        status_cols[4].metric("Positions", int(managed_status.get("positions_count") or 0))
-        status_cols[5].metric("Pending", int(managed_status.get("pending_orders_count") or 0))
+        status_cols[0].metric("실행중", _mode_text("ON" if managed_status.get("running") else "OFF"))
+        status_cols[1].metric("모드", _mode_text(str(managed_status.get("mode") or "-")))
+        status_cols[2].metric("종목 수", int(managed_status.get("config", {}).get("markets") or 0))
+        status_cols[3].metric("주기", f"{int(managed_status.get('config', {}).get('loop_seconds') or 0)}초")
+        status_cols[4].metric("보유", int(managed_status.get("positions_count") or 0))
+        status_cols[5].metric("미체결", int(managed_status.get("pending_orders_count") or 0))
 
         action_cols = st.columns([1, 1, 1.5])
-        if action_cols[0].button("Start Background Worker", use_container_width=True):
+        if action_cols[0].button("백그라운드 워커 시작", use_container_width=True):
             managed_status = start_managed_worker(managed_worker_config)
             st.session_state["LIVE_BG_NOTICE"] = "백그라운드 CLI 워커를 시작했습니다."
-        if action_cols[1].button("Stop Background Worker", use_container_width=True):
+        if action_cols[1].button("백그라운드 워커 중지", use_container_width=True):
             managed_status = stop_managed_worker()
             st.session_state["LIVE_BG_NOTICE"] = "백그라운드 CLI 워커를 중지했습니다."
         action_cols[2].caption("이 워커는 웹 페이지를 닫아도 계속 돌 수 있고, 텔레그램 제어 대상도 이 워커입니다.")
@@ -1265,17 +1560,17 @@ def render_live():
 
         log_tail = read_worker_log_tail(20)
         if log_tail:
-            with st.expander("Recent CLI Log", expanded=False):
+            with st.expander("최근 CLI 로그", expanded=False):
                 st.code(log_tail, language="text")
 
     worker_cols = st.columns([1, 1, 1, 1.4])
-    worker_interval = int(worker_cols[0].number_input("Worker Seconds", 5, 3600, 30, 1, key="live_worker_interval"))
+    worker_interval = int(worker_cols[0].number_input("페이지 워커 주기(초)", 5, 3600, 30, 1, key="live_worker_interval"))
     params["worker_interval"] = worker_interval
     changed = params != (st.session_state.get("LIVE_PARAMS") or {})
     st.session_state["LIVE_PARAMS"] = dict(params)
-    start = worker_cols[1].button("Start Worker", use_container_width=True)
-    stop = worker_cols[2].button("Stop Worker", use_container_width=True)
-    worker_cols[3].markdown(f"**Mode:** {'LIVE' if live_trading else 'SIM'} / **Strategy:** `{strategy_label(strategy_name)}`")
+    start = worker_cols[1].button("페이지 워커 시작", use_container_width=True)
+    stop = worker_cols[2].button("페이지 워커 중지", use_container_width=True)
+    worker_cols[3].markdown(f"**모드:** {_mode_text('LIVE' if live_trading else 'SIM')} / **전략:** `{strategy_label(strategy_name)}`")
 
     if "LIVE_WORKER" not in st.session_state:
         st.session_state["LIVE_WORKER"] = _Worker()
@@ -1324,24 +1619,35 @@ def render_live():
 
     metrics = st.session_state.get("LIVE_METRICS") or {}
     metric_cols = st.columns(7)
-    metric_cols[0].metric("Day", metrics.get("day_date", "-"))
-    metric_cols[1].metric("Daily Buy", fmt_full_number(metrics.get("daily_buy"), 0))
-    metric_cols[2].metric("Realized", fmt_full_number(metrics.get("realized_pnl"), 0))
-    metric_cols[3].metric("Unrealized", fmt_full_number(metrics.get("unrealized_pnl"), 0))
-    metric_cols[4].metric("Total PnL", fmt_full_number(metrics.get("total_pnl"), 0))
-    metric_cols[5].metric("Worker", "ON" if st.session_state.get("LIVE_WORKING") else "OFF")
-    metric_cols[6].metric("Kill", "ON" if bool(kill_state.get("enabled")) else "OFF")
+    metric_cols[0].metric("기준일", metrics.get("day_date", "-"))
+    metric_cols[1].metric("일일 매수", fmt_full_number(metrics.get("daily_buy"), 0))
+    metric_cols[2].metric("실현손익", fmt_full_number(metrics.get("realized_pnl"), 0))
+    metric_cols[3].metric("미실현손익", fmt_full_number(metrics.get("unrealized_pnl"), 0))
+    metric_cols[4].metric("총 손익", fmt_full_number(metrics.get("total_pnl"), 0))
+    metric_cols[5].metric("페이지 워커", _mode_text("ON" if st.session_state.get("LIVE_WORKING") else "OFF"))
+    metric_cols[6].metric("긴급중지", _mode_text("ON" if bool(kill_state.get("enabled")) else "OFF"))
 
     result = st.session_state.get("LIVE_RESULTS") or {}
     table = result.get("table")
     if table is not None and isinstance(table, pd.DataFrame) and not table.empty:
-        st.dataframe(table[["market", "price", "score", "trades", "return_pct", "win_rate_pct", "max_drawdown_pct", "last_signal", "position"]], use_container_width=True, hide_index=True)
-        selected_market = st.selectbox("Detail Market", table["market"].tolist(), key="live_detail_market")
+        st.dataframe(_present_leaderboard(table), use_container_width=True, hide_index=True)
+        selected_market = st.selectbox("상세 종목", table["market"].tolist(), key="live_detail_market")
         detail = result.get("detail") or {}
         if selected_market in detail:
-            st.plotly_chart(_render_chart(detail[selected_market]["df"], strategy_name, detail[selected_market]["bt"]), use_container_width=True)
+            st.caption("빈 삼각형은 전략 신호, 다이아몬드는 실제 체결, 노란 점선은 현재 보유 평균 진입가입니다.")
+            st.plotly_chart(
+                _render_chart(
+                    detail[selected_market]["df"],
+                    strategy_name,
+                    detail[selected_market]["bt"],
+                    trade_log=st.session_state.get("LIVE_TRADES") or [],
+                    market=selected_market,
+                    position=(st.session_state.get("LIVE_POSITIONS") or {}).get(selected_market),
+                ),
+                use_container_width=True,
+            )
     else:
-        st.info("Run the live desk once to build a leaderboard.")
+        st.info("라이브 데스크를 한 번 실행하면 상위 종목 표가 생성됩니다.")
 
     positions = st.session_state.get("LIVE_POSITIONS") or {}
     if positions:
@@ -1361,18 +1667,15 @@ def render_live():
                 pnl_value = None
                 pnl_pct = None
             position_rows.append({"market": market, "qty": qty, "entry": entry, "cost": cost, "current_price": current_price, "pnl_value": pnl_value, "pnl_pct": pnl_pct})
-        st.subheader("Open Positions")
-        st.dataframe(pd.DataFrame(position_rows), use_container_width=True, hide_index=True)
+        st.subheader("보유 포지션")
+        st.dataframe(_present_positions(position_rows), use_container_width=True, hide_index=True)
 
     st.session_state.setdefault("LIVE_TRADES", [])
-    with st.expander("Trade Log", expanded=False):
-        if st.button("Clear Log"):
+    with st.expander("체결 로그", expanded=False):
+        if st.button("로그 비우기"):
             st.session_state["LIVE_TRADES"] = []
         logs = st.session_state.get("LIVE_TRADES") or []
         if logs:
-            log_frame = pd.DataFrame(logs).sort_values("ts").tail(200)
-            log_frame["time"] = pd.to_datetime(log_frame["ts"], unit="s").dt.strftime("%H:%M:%S")
-            preferred = ["time", "market", "side", "price", "qty", "cost", "entry", "pnl_value", "pnl_pct", "reason", "strategy"]
-            st.dataframe(log_frame[[column for column in preferred if column in log_frame.columns]], use_container_width=True, hide_index=True)
+            st.dataframe(_present_trade_log(logs), use_container_width=True, hide_index=True)
         else:
-            st.caption("No trades yet.")
+            st.caption("아직 체결 로그가 없습니다.")

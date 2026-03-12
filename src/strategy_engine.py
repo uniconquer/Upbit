@@ -14,8 +14,13 @@ except ImportError:
 FluxCallable = Callable[..., pd.DataFrame] | None
 
 STRATEGY_LABELS = {
-    "research_trend": "Research Trend",
-    "flux_trend": "Flux Trend",
+    "research_trend": "연구형 추세 돌파",
+    "flux_trend": "플럭스 추세 밴드",
+}
+
+STRATEGY_DESCRIPTIONS = {
+    "research_trend": "EMA 정배열, 거래량 동반 돌파, ADX 추세 강도, ATR 이탈 손절을 함께 보는 추세 전략입니다.",
+    "flux_trend": "다중 시간대 밴드와 추세 기준선을 함께 보는 추세 추종 전략입니다.",
 }
 
 
@@ -28,6 +33,10 @@ def strategy_options(flux_available: bool) -> list[str]:
 
 def strategy_label(name: str) -> str:
     return STRATEGY_LABELS.get(name, name)
+
+
+def strategy_description(name: str) -> str:
+    return STRATEGY_DESCRIPTIONS.get(name, name)
 
 
 def build_strategy_frame(

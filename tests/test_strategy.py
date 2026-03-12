@@ -7,6 +7,7 @@ from src.risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_f
 from src.strategy import (
     backtest_signal_frame,
     build_research_trend_signals,
+    extract_backtest_trade_events,
     rsi_signals,
     sma_cross_signals,
 )
@@ -74,6 +75,22 @@ def test_backtest_slippage_reduces_return():
     base = backtest_signal_frame(frame, fee=0.0005, slippage_bps=0.0)
     slipped = backtest_signal_frame(frame, fee=0.0005, slippage_bps=10.0)
     assert float(slipped["total_return_pct"]) <= float(base["total_return_pct"])
+
+
+def test_extract_backtest_trade_events_pairs_entries_and_exits():
+    frame = pd.DataFrame(
+        {
+            "close": [100, 102, 104, 103, 101, 99],
+            "buy_signal": [False, True, False, False, False, False],
+            "sell_signal": [False, False, False, True, False, False],
+        },
+        index=pd.date_range("2026-01-01", periods=6, freq="1h"),
+    )
+    events = extract_backtest_trade_events(frame)
+    assert events == [
+        {"ts": frame.index[1], "side": "BUY", "price": 102.0},
+        {"ts": frame.index[3], "side": "SELL", "price": 103.0},
+    ]
 
 
 def test_paper_trader_round_trip():

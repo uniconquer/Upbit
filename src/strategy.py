@@ -296,6 +296,30 @@ def backtest_signal_frame(
     }
 
 
+def extract_backtest_trade_events(
+    df: pd.DataFrame,
+    *,
+    entry_col: str = "buy_signal",
+    exit_col: str = "sell_signal",
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    if df.empty or "close" not in df.columns or entry_col not in df.columns or exit_col not in df.columns:
+        return events
+
+    in_position = False
+    for timestamp, row in df.iterrows():
+        price = row.get("close")
+        if price is None or pd.isna(price):
+            continue
+        if (not in_position) and bool(row.get(entry_col)):
+            in_position = True
+            events.append({"ts": timestamp, "side": "BUY", "price": float(price)})
+        elif in_position and bool(row.get(exit_col)):
+            in_position = False
+            events.append({"ts": timestamp, "side": "SELL", "price": float(price)})
+    return events
+
+
 SMA_HELP_MD = (
     "### SMA Cross\n\n"
     "Short moving average crossing the long moving average.\n"
@@ -323,6 +347,7 @@ __all__ = [
     "build_research_trend_signals",
     "ema",
     "ema_cross_signals",
+    "extract_backtest_trade_events",
     "momentum_signals",
     "rsi_signals",
     "sma",
