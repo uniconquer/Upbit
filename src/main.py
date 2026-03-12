@@ -5,6 +5,13 @@ from dotenv import load_dotenv
 from rich import print
 from upbit_api import UpbitAPI
 
+try:
+    from telegram_control import run_control_loop
+    from worker_control import format_worker_status, load_managed_worker_status, start_managed_worker, stop_managed_worker
+except ImportError:
+    from src.telegram_control import run_control_loop
+    from src.worker_control import format_worker_status, load_managed_worker_status, start_managed_worker, stop_managed_worker
+
 
 def cmd_markets(api: UpbitAPI, base: str = "KRW", limit: int = 5):
     all_markets = api.markets()
@@ -88,6 +95,13 @@ def main():
     p5.add_argument('--price')
     p5.add_argument('--simulate', action='store_true')
 
+    sub.add_parser('worker-status')
+    sub.add_parser('worker-start')
+    sub.add_parser('worker-stop')
+
+    p9 = sub.add_parser('telegram-control')
+    p9.add_argument('--poll-timeout', type=int, default=25)
+
     args = parser.parse_args()
     api = UpbitAPI(access_key=os.getenv('UPBIT_ACCESS_KEY'), secret_key=os.getenv('UPBIT_SECRET_KEY'))
 
@@ -105,6 +119,14 @@ def main():
             print({'error': str(e)})
     elif args.cmd == 'order':
         print(api.create_order(args.market, args.side, args.ord_type, volume=args.volume, price=args.price, simulate=args.simulate))
+    elif args.cmd == 'worker-status':
+        print(format_worker_status(load_managed_worker_status()))
+    elif args.cmd == 'worker-start':
+        print(format_worker_status(start_managed_worker()))
+    elif args.cmd == 'worker-stop':
+        print(format_worker_status(stop_managed_worker()))
+    elif args.cmd == 'telegram-control':
+        run_control_loop(poll_timeout=args.poll_timeout)
 
 
 if __name__ == '__main__':

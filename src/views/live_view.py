@@ -36,6 +36,14 @@ from trading_costs import TradingCostModel, cost_model_from_values
 from ui_theme import apply_chart_theme, page_intro
 from upbit_api import UpbitAPI
 from utils.formatters import fmt_full_number
+from worker_control import (
+    coerce_worker_config,
+    format_worker_status,
+    load_managed_worker_status,
+    read_worker_log_tail,
+    start_managed_worker,
+    stop_managed_worker,
+)
 
 
 api: UpbitAPI | None = None
@@ -275,6 +283,52 @@ def _cost_model_from_params(params: dict) -> TradingCostModel:
         fee_rate=float(params.get("fee") or 0.0),
         slippage_bps=float(params.get("slippage_bps") or 0.0),
     )
+
+
+def _managed_worker_config_from_live_params(params: dict) -> dict:
+    risk_limits = dict(params.get("risk_limits") or {})
+    base = {
+        "strategy": str(params.get("strategy_name") or "research_trend"),
+        "interval": str(params.get("interval") or "minute30"),
+        "count": int(params.get("count") or 240),
+        "markets": int(params.get("topn") or 20),
+        "loop_seconds": int(params.get("worker_interval") or 30),
+        "max_open": 5,
+        "min_fetch_seconds": 20.0,
+        "per_request_sleep": 0.12,
+        "fee": float(params.get("fee") or 0.0),
+        "slippage_bps": float(params.get("slippage_bps") or 0.0),
+        "live_orders": bool(params.get("live_trading")),
+        "kill_switch_name": str(params.get("kill_switch_name") or LIVE_KILL_SWITCH_NAME),
+        "max_trade_krw": float(risk_limits.get("max_trade_krw") or 0.0),
+        "max_trade_pct": float(risk_limits.get("max_trade_pct") or 0.0),
+        "per_asset_max_pct": float(risk_limits.get("per_asset_max_pct") or 0.0),
+        "daily_buy_limit": float(risk_limits.get("daily_buy_limit") or 0.0),
+        "daily_loss_limit_krw": float(risk_limits.get("daily_loss_limit_krw") or 0.0),
+        "daily_loss_limit_pct": float(risk_limits.get("daily_loss_limit_pct") or 0.0),
+        "include_unrealized_loss": bool(risk_limits.get("include_unrealized_loss")),
+    }
+    for field in [
+        "fast_ema",
+        "slow_ema",
+        "breakout_window",
+        "exit_window",
+        "atr_window",
+        "atr_mult",
+        "adx_window",
+        "adx_threshold",
+        "momentum_window",
+        "volume_window",
+        "volume_threshold",
+        "ltf_len",
+        "ltf_mult",
+        "htf_len",
+        "htf_mult",
+        "htf_rule",
+    ]:
+        if field in params:
+            base[field] = params[field]
+    return coerce_worker_config(base)
 
 
 def _record_entry_trade(
@@ -1165,6 +1219,54 @@ def render_live():
         "kill_switch_name": LIVE_KILL_SWITCH_NAME,
         **strategy_params,
     }
+    params["worker_interval"] = int(st.session_state.get("live_worker_interval", 30) or 30)
+    managed_worker_config = _managed_worker_config_from_live_params(params)
+
+    with st.expander("How Execution Works", expanded=False):
+        st.markdown(
+            "\n".join(
+                [
+                    "- `Start Worker`: 현재 브라우저 세션 안에서만 도는 페이지 전용 워커입니다. 페이지를 닫거나 앱이 내려가면 멈춥니다.",
+                    "- `Start Background Worker`: 별도 Python 프로세스로 도는 CLI 워커입니다. 텔레그램 제어와 같은 워커를 바라봅니다.",
+                    "- `telegram-control`: 텔레그램으로 명령을 받는 별도 봇 프로세스입니다. 이 프로세스가 켜져 있어야 `/status`, `/start_worker` 같은 명령이 동작합니다.",
+                    "- 현재 텔레그램은 기본적으로 알림 발송용이고, 제어 명령은 `telegram-control`을 실행했을 때만 활성화됩니다.",
+                ]
+            )
+        )
+        st.code(
+            "python -m streamlit run .\\src\\app_streamlit.py\n"
+            "python .\\src\\main.py telegram-control\n"
+            "python .\\src\\main.py worker-status",
+            language="powershell",
+        )
+
+    managed_status = load_managed_worker_status()
+    with st.expander("Background CLI Worker (Telegram / Automation)", expanded=bool(managed_status.get("running"))):
+        status_cols = st.columns(6)
+        status_cols[0].metric("Running", "ON" if managed_status.get("running") else "OFF")
+        status_cols[1].metric("Mode", str(managed_status.get("mode") or "-"))
+        status_cols[2].metric("Markets", int(managed_status.get("config", {}).get("markets") or 0))
+        status_cols[3].metric("Loop", f"{int(managed_status.get('config', {}).get('loop_seconds') or 0)}s")
+        status_cols[4].metric("Positions", int(managed_status.get("positions_count") or 0))
+        status_cols[5].metric("Pending", int(managed_status.get("pending_orders_count") or 0))
+
+        action_cols = st.columns([1, 1, 1.5])
+        if action_cols[0].button("Start Background Worker", use_container_width=True):
+            managed_status = start_managed_worker(managed_worker_config)
+            st.session_state["LIVE_BG_NOTICE"] = "백그라운드 CLI 워커를 시작했습니다."
+        if action_cols[1].button("Stop Background Worker", use_container_width=True):
+            managed_status = stop_managed_worker()
+            st.session_state["LIVE_BG_NOTICE"] = "백그라운드 CLI 워커를 중지했습니다."
+        action_cols[2].caption("이 워커는 웹 페이지를 닫아도 계속 돌 수 있고, 텔레그램 제어 대상도 이 워커입니다.")
+
+        if st.session_state.get("LIVE_BG_NOTICE"):
+            st.info(str(st.session_state["LIVE_BG_NOTICE"]))
+        st.code(format_worker_status(managed_status), language="text")
+
+        log_tail = read_worker_log_tail(20)
+        if log_tail:
+            with st.expander("Recent CLI Log", expanded=False):
+                st.code(log_tail, language="text")
 
     worker_cols = st.columns([1, 1, 1, 1.4])
     worker_interval = int(worker_cols[0].number_input("Worker Seconds", 5, 3600, 30, 1, key="live_worker_interval"))
