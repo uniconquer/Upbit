@@ -461,6 +461,6 @@ def format_worker_status(snapshot: Mapping[str, Any]) -> str:
     reason = str(kill_switch.get("reason") or "").strip()
     if reason:
         lines.append(f"- 긴급중지 사유: {reason}")
-    if snapshot.get("pid"):
+    if snapshot.get("running") and snapshot.get("pid"):
         lines.append(f"- PID: {snapshot.get('pid')}")
     return "\n".join(lines)
