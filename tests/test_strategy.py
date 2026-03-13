@@ -8,8 +8,10 @@ from src.strategy import (
     backtest_signal_frame,
     build_research_trend_signals,
     extract_backtest_trade_events,
+    parameter_grid_size,
     rsi_signals,
     sma_cross_signals,
+    sweep_research_trend_parameters,
 )
 
 
@@ -94,6 +96,28 @@ def test_extract_backtest_trade_events_pairs_entries_and_exits():
         {"ts": frame.index[1], "side": "BUY", "price": 102.0},
         {"ts": frame.index[3], "side": "SELL", "price": 103.0},
     ]
+
+
+def test_parameter_grid_size_multiplies_candidates():
+    assert parameter_grid_size({"fast_ema": [12, 21, 34], "slow_ema": [55, 89]}) == 6
+
+
+def test_sweep_research_trend_parameters_returns_ranked_rows():
+    results = sweep_research_trend_parameters(
+        _sample_ohlcv(),
+        base_params={"exit_window": 10, "atr_window": 14, "momentum_window": 20, "volume_window": 20, "volume_threshold": 0.9},
+        candidate_grid={
+            "fast_ema": [12, 21],
+            "slow_ema": [34, 55],
+            "breakout_window": [10, 20],
+            "atr_mult": [2.0],
+            "adx_threshold": [16.0],
+        },
+    )
+
+    assert len(results) == 8
+    assert {"fast_ema", "slow_ema", "breakout_window", "total_return_pct", "max_drawdown_pct"}.issubset(results.columns)
+    assert results["total_return_pct"].iloc[0] >= results["total_return_pct"].iloc[-1]
 
 
 def test_paper_trader_round_trip():

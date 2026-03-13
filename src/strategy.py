@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import product
 from typing import Sequence
 
 import numpy as np
@@ -302,6 +303,69 @@ def backtest_signal_frame(
     }
 
 
+def parameter_grid_size(param_grid: dict[str, Sequence[float | int]]) -> int:
+    sizes = [len(list(values)) for values in param_grid.values() if list(values)]
+    if not sizes:
+        return 0
+    total = 1
+    for size in sizes:
+        total *= size
+    return total
+
+
+def sweep_research_trend_parameters(
+    raw: pd.DataFrame,
+    *,
+    base_params: dict[str, float | int] | None = None,
+    candidate_grid: dict[str, Sequence[float | int]] | None = None,
+    fee: float = 0.0005,
+    slippage_bps: float = 3.0,
+) -> pd.DataFrame:
+    base = dict(base_params or {})
+    grid = {key: list(values) for key, values in dict(candidate_grid or {}).items() if list(values)}
+    if not grid:
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = []
+    keys = list(grid.keys())
+    for combo in product(*(grid[key] for key in keys)):
+        combo_params = dict(zip(keys, combo, strict=False))
+        merged = {**base, **combo_params}
+        frame = build_research_trend_signals(
+            raw,
+            fast_ema=int(merged.get("fast_ema", 21)),
+            slow_ema=int(merged.get("slow_ema", 55)),
+            breakout_window=int(merged.get("breakout_window", 20)),
+            exit_window=int(merged.get("exit_window", 10)),
+            atr_window=int(merged.get("atr_window", 14)),
+            atr_mult=float(merged.get("atr_mult", 2.5)),
+            adx_window=int(merged.get("adx_window", 14)),
+            adx_threshold=float(merged.get("adx_threshold", 18.0)),
+            momentum_window=int(merged.get("momentum_window", 20)),
+            volume_window=int(merged.get("volume_window", 20)),
+            volume_threshold=float(merged.get("volume_threshold", 0.9)),
+        )
+        bt = backtest_signal_frame(frame, fee=fee, slippage_bps=slippage_bps)
+        rows.append(
+            {
+                **combo_params,
+                "trades": int(bt["trades"]),
+                "buy_signals": int(frame["buy_signal"].sum()),
+                "sell_signals": int(frame["sell_signal"].sum()),
+                "total_return_pct": float(bt["total_return_pct"]),
+                "win_rate_pct": float(bt["win_rate_pct"]),
+                "max_drawdown_pct": float(bt["max_drawdown_pct"]),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    results = pd.DataFrame(rows)
+    return results.sort_values(
+        ["total_return_pct", "max_drawdown_pct", "win_rate_pct", "trades"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
+
+
 def extract_backtest_trade_events(
     df: pd.DataFrame,
     *,
@@ -355,7 +419,9 @@ __all__ = [
     "ema_cross_signals",
     "extract_backtest_trade_events",
     "momentum_signals",
+    "parameter_grid_size",
     "rsi_signals",
     "sma",
     "sma_cross_signals",
+    "sweep_research_trend_parameters",
 ]

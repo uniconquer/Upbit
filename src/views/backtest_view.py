@@ -5,7 +5,12 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from strategy import backtest_signal_frame, extract_backtest_trade_events
+from strategy import (
+    backtest_signal_frame,
+    extract_backtest_trade_events,
+    parameter_grid_size,
+    sweep_research_trend_parameters,
+)
 from strategy_engine import build_strategy_frame, strategy_description, strategy_label, strategy_options
 from ui_theme import apply_chart_theme, page_intro
 from upbit_api import UpbitAPI
@@ -230,6 +235,26 @@ def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
     return strategy_name, params
 
 
+def _parse_sweep_values(raw: str, caster):
+    values = []
+    for chunk in str(raw or "").split(","):
+        text = chunk.strip()
+        if not text:
+            continue
+        try:
+            values.append(caster(text))
+        except Exception:
+            continue
+    deduped = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        deduped.append(value)
+        seen.add(value)
+    return deduped
+
+
 def _format_signal_time(index_value) -> str:
     if index_value is None:
         return "-"
@@ -273,6 +298,42 @@ def _research_condition_table(frame: pd.DataFrame, params: dict[str, float | int
             }
         )
     return pd.DataFrame(rows)
+
+
+def _present_sweep_results(results: pd.DataFrame) -> pd.DataFrame:
+    visible = results.copy()
+    for column in ["total_return_pct", "win_rate_pct", "max_drawdown_pct"]:
+        if column in visible.columns:
+            visible[column] = visible[column].apply(lambda value: f"{float(value):.2f}%")
+    ordered = [
+        "fast_ema",
+        "slow_ema",
+        "breakout_window",
+        "atr_mult",
+        "adx_threshold",
+        "trades",
+        "buy_signals",
+        "sell_signals",
+        "total_return_pct",
+        "win_rate_pct",
+        "max_drawdown_pct",
+    ]
+    columns = [column for column in ordered if column in visible.columns]
+    return visible[columns].rename(
+        columns={
+            "fast_ema": "빠른 EMA",
+            "slow_ema": "느린 EMA",
+            "breakout_window": "돌파 창",
+            "atr_mult": "ATR 배수",
+            "adx_threshold": "ADX 기준",
+            "trades": "거래 수",
+            "buy_signals": "매수 신호 수",
+            "sell_signals": "매도 신호 수",
+            "total_return_pct": "수익률",
+            "win_rate_pct": "승률",
+            "max_drawdown_pct": "최대 낙폭",
+        }
+    )
 
 
 def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, object]):
@@ -486,8 +547,11 @@ def render_backtest():
             except Exception as exc:
                 st.error(f"전략 차트 생성에 실패했습니다: {exc}")
                 return
+            st.session_state["bt_raw_frame"] = raw[["open", "high", "low", "close", "volume"]].copy()
             st.session_state["bt_frame"] = frame
             st.session_state["bt_context"] = current_key
+            st.session_state.pop("bt_sweep_results", None)
+            st.session_state.pop("bt_sweep_meta", None)
 
         frame = st.session_state.get("bt_frame")
         if frame is None or frame.empty:
@@ -547,3 +611,74 @@ def render_backtest():
             }
         )
         st.dataframe(visible, use_container_width=True)
+
+        if strategy_name == "research_trend":
+            with st.expander("파라미터 스윕", expanded=False):
+                st.caption("현재 선택한 종목과 주기로 여러 조합을 자동 비교합니다. 기본값은 현재 전략 설정을 기준으로 합니다.")
+                sweep_cols1 = st.columns(3)
+                sweep_cols2 = st.columns(2)
+                fast_candidates = _parse_sweep_values(
+                    sweep_cols1[0].text_input("빠른 EMA 후보", "12, 21, 34", key="bt_sweep_fast_ema"),
+                    int,
+                )
+                slow_candidates = _parse_sweep_values(
+                    sweep_cols1[1].text_input("느린 EMA 후보", "55, 89", key="bt_sweep_slow_ema"),
+                    int,
+                )
+                breakout_candidates = _parse_sweep_values(
+                    sweep_cols1[2].text_input("돌파 창 후보", "14, 20, 28", key="bt_sweep_breakout"),
+                    int,
+                )
+                atr_mult_candidates = _parse_sweep_values(
+                    sweep_cols2[0].text_input("ATR 배수 후보", "2.0, 2.5, 3.0", key="bt_sweep_atr_mult"),
+                    float,
+                )
+                adx_candidates = _parse_sweep_values(
+                    sweep_cols2[1].text_input("ADX 기준 후보", "16, 18, 20", key="bt_sweep_adx_threshold"),
+                    float,
+                )
+                grid = {
+                    "fast_ema": fast_candidates,
+                    "slow_ema": slow_candidates,
+                    "breakout_window": breakout_candidates,
+                    "atr_mult": atr_mult_candidates,
+                    "adx_threshold": adx_candidates,
+                }
+                combo_count = parameter_grid_size(grid)
+                st.caption(f"총 조합 수: {combo_count}개")
+                run_sweep = st.button("파라미터 스윕 실행", use_container_width=True)
+                if combo_count == 0:
+                    st.info("후보 값을 한 개 이상 입력해 주세요.")
+                elif combo_count > 240:
+                    st.warning("조합 수가 너무 많습니다. 240개 이하로 줄여 주세요.")
+                elif run_sweep:
+                    raw_frame = st.session_state.get("bt_raw_frame")
+                    if raw_frame is None or raw_frame.empty:
+                        st.warning("먼저 기본 분석을 실행해 주세요.")
+                    else:
+                        results = sweep_research_trend_parameters(
+                            raw_frame,
+                            base_params={key: value for key, value in strategy_params.items() if isinstance(value, (int, float))},
+                            candidate_grid=grid,
+                            fee=fee,
+                            slippage_bps=slippage_bps,
+                        )
+                        st.session_state["bt_sweep_results"] = results
+                        st.session_state["bt_sweep_meta"] = {"market": selected_market, "interval": interval, "count": count}
+
+                sweep_results = st.session_state.get("bt_sweep_results")
+                sweep_meta = st.session_state.get("bt_sweep_meta") or {}
+                if isinstance(sweep_results, pd.DataFrame) and not sweep_results.empty:
+                    if sweep_meta.get("market") == selected_market and sweep_meta.get("interval") == interval and int(sweep_meta.get("count") or 0) == count:
+                        best = sweep_results.iloc[0]
+                        best_cols = st.columns(4)
+                        best_cols[0].metric("1위 수익률", f"{float(best['total_return_pct']):.2f}%")
+                        best_cols[1].metric("1위 최대 낙폭", f"{float(best['max_drawdown_pct']):.2f}%")
+                        best_cols[2].metric("1위 거래 수", int(best["trades"]))
+                        best_cols[3].metric(
+                            "1위 조합",
+                            f"EMA {int(best['fast_ema'])}/{int(best['slow_ema'])} · 돌파 {int(best['breakout_window'])}",
+                        )
+                        st.dataframe(_present_sweep_results(sweep_results.head(20)), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("종목이나 주기가 바뀌어서 이전 스윕 결과를 숨겼습니다. 다시 실행해 주세요.")
