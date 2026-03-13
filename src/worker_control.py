@@ -13,9 +13,11 @@ from typing import Any, Mapping
 try:
     from kill_switch import effective_kill_switch
     from runtime_store import load_runtime_state, runtime_dir, save_runtime_state
+    from strategy_engine import strategy_label
 except ImportError:
     from src.kill_switch import effective_kill_switch
     from src.runtime_store import load_runtime_state, runtime_dir, save_runtime_state
+    from src.strategy_engine import strategy_label
 
 
 KST = timezone(timedelta(hours=9))
@@ -105,6 +107,10 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "htf_len": _to_int(os.getenv("UPBIT_WORKER_HTF_LEN"), 20),
         "htf_mult": _to_float(os.getenv("UPBIT_WORKER_HTF_MULT"), 2.25),
         "htf_rule": os.getenv("UPBIT_WORKER_HTF_RULE", "60T"),
+        "sensitivity": _to_int(os.getenv("UPBIT_WORKER_SENSITIVITY"), 3),
+        "atr_period": _to_int(os.getenv("UPBIT_WORKER_ATR_PERIOD"), 2),
+        "trend_ema_length": _to_int(os.getenv("UPBIT_WORKER_TREND_EMA_LENGTH"), 240),
+        "use_heikin_ashi": _to_bool(os.getenv("UPBIT_WORKER_USE_HEIKIN_ASHI"), False),
     }
 
     config = {**defaults, **raw}
@@ -153,6 +159,9 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "volume_window",
         "ltf_len",
         "htf_len",
+        "sensitivity",
+        "atr_period",
+        "trend_ema_length",
     ]
     for field in integer_fields:
         config[field] = max(_to_int(config.get(field), defaults[field]), 1)
@@ -167,6 +176,7 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
     for field, fallback in float_fields.items():
         config[field] = max(_to_float(config.get(field), fallback), 0.0)
     config["htf_rule"] = str(config.get("htf_rule") or defaults["htf_rule"])
+    config["use_heikin_ashi"] = _to_bool(config.get("use_heikin_ashi"), defaults["use_heikin_ashi"])
     return config
 
 
@@ -274,6 +284,19 @@ def build_worker_command(config: Mapping[str, Any]) -> list[str]:
                 str(cfg["htf_rule"]),
             ]
         )
+        if cfg["strategy"] == "flux_ema_filter":
+            command.extend(
+                [
+                    "--sensitivity",
+                    str(cfg["sensitivity"]),
+                    "--atr-period",
+                    str(cfg["atr_period"]),
+                    "--trend-ema-length",
+                    str(cfg["trend_ema_length"]),
+                ]
+            )
+            if cfg["use_heikin_ashi"]:
+                command.append("--use-heikin-ashi")
     if cfg["live_orders"]:
         command.append("--live-orders")
     return command
@@ -453,7 +476,7 @@ def format_worker_status(snapshot: Mapping[str, Any]) -> str:
         "[CLI 워커] 상태",
         f"- 실행: {running_label}",
         f"- 모드: {snapshot.get('mode')}",
-        f"- 전략: {config.get('strategy')} / 마켓 {int(config.get('markets') or 0)}개 / 루프 {int(config.get('loop_seconds') or 0)}초",
+        f"- 전략: {strategy_label(str(config.get('strategy') or 'research_trend'))} / 마켓 {int(config.get('markets') or 0)}개 / 루프 {int(config.get('loop_seconds') or 0)}초",
         f"- 보유 포지션: {int(snapshot.get('positions_count') or 0)}개 / 미체결: {int(snapshot.get('pending_orders_count') or 0)}건 / 트레이드 로그: {int(snapshot.get('trade_count') or 0)}건",
         f"- 일일 손익: {float(metrics.get('total_pnl') or 0.0):+.0f} KRW / 마지막 저장: {_format_kst_timestamp(snapshot.get('last_saved_at'))}",
         f"- 긴급중지: {kill_label}",

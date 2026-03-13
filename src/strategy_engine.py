@@ -17,18 +17,22 @@ FluxCallable = Callable[..., pd.DataFrame] | None
 STRATEGY_LABELS = {
     "research_trend": "연구형 추세 돌파",
     "flux_trend": "플럭스 추세 밴드",
+    "flux_ema_filter": "플럭스 + EMA 필터",
 }
 
 STRATEGY_DESCRIPTIONS = {
     "research_trend": "EMA 정배열, 거래량 동반 돌파, ADX 추세 강도, ATR 이탈 손절을 함께 보는 추세 전략입니다.",
     "flux_trend": "다중 시간대 볼린저 밴드와 칼만 기준선을 함께 보는 반전·재진입형 전략입니다.",
+    "flux_ema_filter": "플럭스 밴드 신호와 EMA·ATR 필터가 동시에 맞을 때만 진입하는 더 엄격한 추세-반전 혼합 전략입니다.",
 }
 
 
-def strategy_options(flux_available: bool) -> list[str]:
+def strategy_options(flux_available: bool, flux_ema_available: bool = False) -> list[str]:
     options = ["research_trend"]
     if flux_available:
         options.append("flux_trend")
+    if flux_ema_available:
+        options.append("flux_ema_filter")
     return options
 
 
@@ -40,12 +44,51 @@ def strategy_description(name: str) -> str:
     return STRATEGY_DESCRIPTIONS.get(name, name)
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _finalize_indicator_frame(
+    raw: pd.DataFrame,
+    indicator_frame: pd.DataFrame,
+    *,
+    use_combo_signals: bool = False,
+) -> pd.DataFrame:
+    result = raw.join(indicator_frame, how="left")
+
+    if "buy_signal" in result.columns:
+        result["buy_signal"] = result["buy_signal"].fillna(False).astype(bool)
+    if "sell_signal" in result.columns:
+        result["sell_signal"] = result["sell_signal"].fillna(False).astype(bool)
+
+    if use_combo_signals:
+        if "buy_signal" in result.columns:
+            result["flux_buy_signal"] = result["buy_signal"]
+        if "sell_signal" in result.columns:
+            result["flux_sell_signal"] = result["sell_signal"]
+        result["buy_signal"] = result.get("combo_buy", pd.Series(False, index=result.index)).fillna(False).astype(bool)
+        result["sell_signal"] = result.get("combo_sell", pd.Series(False, index=result.index)).fillna(False).astype(bool)
+
+    if "strategy_score" not in result.columns:
+        if "strength" in result.columns:
+            strength = pd.to_numeric(result["strength"], errors="coerce")
+            result["strategy_score"] = strength.replace([float("inf"), float("-inf")], 0.0).fillna(0.0)
+        else:
+            result["strategy_score"] = 0.0
+    return result
+
+
 def build_strategy_frame(
     raw: pd.DataFrame,
     *,
     strategy_name: str,
     params: dict[str, Any] | None = None,
     flux_indicator: FluxCallable = None,
+    flux_indicator_with_ema: FluxCallable = None,
 ) -> pd.DataFrame:
     params = params or {}
 
@@ -76,10 +119,24 @@ def build_strategy_frame(
             htf_length=int(params.get("htf_len", 20)),
             htf_rule=str(params.get("htf_rule", "30T")),
         )
-        result = raw.join(indicator_frame, how="left")
-        if "strategy_score" not in result.columns:
-            result["strategy_score"] = 0.0
-        return result
+        return _finalize_indicator_frame(raw, indicator_frame)
+
+    if strategy_name == "flux_ema_filter":
+        if flux_indicator_with_ema is None:
+            raise RuntimeError("Flux EMA strategy selected but the extended flux indicator is unavailable")
+        indicator_frame = flux_indicator_with_ema(
+            raw,
+            ltf_mult=float(params.get("ltf_mult", 2.0)),
+            ltf_length=int(params.get("ltf_len", 20)),
+            htf_mult=float(params.get("htf_mult", 2.25)),
+            htf_length=int(params.get("htf_len", 20)),
+            htf_rule=str(params.get("htf_rule", "30T")),
+            sensitivity=int(params.get("sensitivity", 3)),
+            atr_period=int(params.get("atr_period", 2)),
+            trend_ema_length=int(params.get("trend_ema_length", 240)),
+            use_heikin_ashi=_as_bool(params.get("use_heikin_ashi"), False),
+        )
+        return _finalize_indicator_frame(raw, indicator_frame, use_combo_signals=True)
 
     raise ValueError(f"unknown strategy: {strategy_name}")
 
@@ -93,6 +150,7 @@ def sweep_strategy_parameters(
     fee: float = 0.0005,
     slippage_bps: float = 3.0,
     flux_indicator: FluxCallable = None,
+    flux_indicator_with_ema: FluxCallable = None,
 ) -> pd.DataFrame:
     base = dict(base_params or {})
     grid = {key: list(values) for key, values in dict(candidate_grid or {}).items() if list(values)}
@@ -109,6 +167,7 @@ def sweep_strategy_parameters(
             strategy_name=strategy_name,
             params=merged,
             flux_indicator=flux_indicator,
+            flux_indicator_with_ema=flux_indicator_with_ema,
         )
         bt = backtest_signal_frame(frame, fee=fee, slippage_bps=slippage_bps)
         rows.append(

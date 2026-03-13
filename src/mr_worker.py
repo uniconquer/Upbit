@@ -36,7 +36,7 @@ try:
     from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
     from runtime_store import load_runtime_state, save_runtime_state
     from strategy import backtest_signal_frame
-    from strategy_engine import build_strategy_frame
+    from strategy_engine import build_strategy_frame, strategy_label
     from trading_costs import TradingCostModel, cost_model_from_values
     from upbit_api import UpbitAPI
 except ImportError:
@@ -64,17 +64,20 @@ except ImportError:
     from src.risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
     from src.runtime_store import load_runtime_state, save_runtime_state
     from src.strategy import backtest_signal_frame
-    from src.strategy_engine import build_strategy_frame
+    from src.strategy_engine import build_strategy_frame, strategy_label
     from src.trading_costs import TradingCostModel, cost_model_from_values
     from src.upbit_api import UpbitAPI
 
 try:
     from flux_bbands_mtf_kalman import indicator as flux_indicator  # type: ignore
+    from flux_bbands_mtf_kalman import indicator_with_ema as flux_indicator_with_ema  # type: ignore
 except Exception:
     try:
         from src.flux_bbands_mtf_kalman import indicator as flux_indicator  # type: ignore
+        from src.flux_bbands_mtf_kalman import indicator_with_ema as flux_indicator_with_ema  # type: ignore
     except Exception:
         flux_indicator = None  # type: ignore
+        flux_indicator_with_ema = None  # type: ignore
 
 
 load_dotenv()
@@ -145,12 +148,24 @@ def _strategy_params_from_args(args) -> dict[str, Any]:
             "volume_window": args.volume_window,
             "volume_threshold": args.volume_threshold,
         }
+    if args.strategy == "flux_trend":
+        return {
+            "ltf_len": args.ltf_len,
+            "ltf_mult": args.ltf_mult,
+            "htf_len": args.htf_len,
+            "htf_mult": args.htf_mult,
+            "htf_rule": args.htf_rule,
+        }
     return {
         "ltf_len": args.ltf_len,
         "ltf_mult": args.ltf_mult,
         "htf_len": args.htf_len,
         "htf_mult": args.htf_mult,
         "htf_rule": args.htf_rule,
+        "sensitivity": args.sensitivity,
+        "atr_period": args.atr_period,
+        "trend_ema_length": args.trend_ema_length,
+        "use_heikin_ashi": args.use_heikin_ashi,
     }
 
 
@@ -400,6 +415,7 @@ class MRMonitor:
             strategy_name=self.strategy_name,
             params=self.strategy_params,
             flux_indicator=flux_indicator,
+            flux_indicator_with_ema=flux_indicator_with_ema,
         )
 
     def _record_trade(self, event: dict[str, Any]) -> None:
@@ -755,7 +771,7 @@ class MRMonitor:
         self._notify(
             start_message(
                 self._mode_label(),
-                strategy_name=self.strategy_name,
+                strategy_name=strategy_label(self.strategy_name),
                 interval=self.interval,
                 markets=len(markets),
                 max_open=self.max_open,
@@ -777,7 +793,7 @@ class MRMonitor:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Strategy monitor for Upbit")
-    parser.add_argument("--strategy", choices=["research_trend", "flux_trend"], default="research_trend")
+    parser.add_argument("--strategy", choices=["research_trend", "flux_trend", "flux_ema_filter"], default="research_trend")
     parser.add_argument("--interval", default="minute30")
     parser.add_argument("--count", type=int, default=240, help="Candles fetched per market")
     parser.add_argument("--markets", type=int, default=20, help="Top N markets by 24h turnover")
@@ -821,6 +837,10 @@ def parse_args():
     parser.add_argument("--htf-len", type=int, default=20)
     parser.add_argument("--htf-mult", type=float, default=2.25)
     parser.add_argument("--htf-rule", default="60T")
+    parser.add_argument("--sensitivity", type=int, default=3)
+    parser.add_argument("--atr-period", type=int, default=2)
+    parser.add_argument("--trend-ema-length", type=int, default=240)
+    parser.add_argument("--use-heikin-ashi", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -828,6 +848,8 @@ def main():
     args = parse_args()
     if args.strategy == "flux_trend" and flux_indicator is None:
         raise SystemExit("Flux strategy requested but flux indicator could not be imported.")
+    if args.strategy == "flux_ema_filter" and flux_indicator_with_ema is None:
+        raise SystemExit("Flux EMA strategy requested but the extended flux indicator could not be imported.")
 
     api = UpbitAPI(
         access_key=os.getenv("UPBIT_ACCESS_KEY"),

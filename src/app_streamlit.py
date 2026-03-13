@@ -12,11 +12,14 @@ from upbit_api import UpbitAPI
 
 try:
     from flux_bbands_mtf_kalman import indicator as flux_indicator  # type: ignore
+    from flux_bbands_mtf_kalman import indicator_with_ema as flux_indicator_with_ema  # type: ignore
 except Exception:
     try:
         from src.flux_bbands_mtf_kalman import indicator as flux_indicator  # type: ignore
+        from src.flux_bbands_mtf_kalman import indicator_with_ema as flux_indicator_with_ema  # type: ignore
     except Exception:
         flux_indicator = None  # type: ignore
+        flux_indicator_with_ema = None  # type: ignore
 
 from views.account_view import init_api as account_init
 from views.account_view import render_account
@@ -36,8 +39,8 @@ api = UpbitAPI(
 )
 
 account_init(api)
-backtest_init(api, flux_indicator, None)
-live_init(api, flux_indicator)
+backtest_init(api, flux_indicator, flux_indicator_with_ema)
+live_init(api, flux_indicator, flux_indicator_with_ema)
 
 
 with st.sidebar:

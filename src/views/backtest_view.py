@@ -47,6 +47,10 @@ _SERIES_LABELS = {
     "ltf_basis": "단기 기준선",
     "htf_upper": "상위 상단 밴드",
     "htf_lower": "상위 하단 밴드",
+    "trend_ema": "추세 EMA",
+    "strength": "EMA 필터 강도",
+    "flux_buy_signal": "원본 플럭스 매수",
+    "flux_sell_signal": "원본 플럭스 매도",
 }
 
 
@@ -194,7 +198,7 @@ def _market_panel(frame: pd.DataFrame) -> str | None:
 
 
 def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
-    options = strategy_options(flux_indicator is not None)
+    options = strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
     current = st.session_state.get("bt_strategy_name", options[0])
     index = options.index(current) if current in options else 0
     strategy_name = st.selectbox(
@@ -223,7 +227,7 @@ def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
             params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1)
             params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1)
             params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1)
-    else:
+    elif strategy_name == "flux_trend":
         with st.expander("플럭스 추세 밴드 설정", expanded=False):
             row = st.columns(5)
             params["ltf_len"] = row[0].number_input("단기 기준 길이", 5, 400, 20, 1)
@@ -232,6 +236,20 @@ def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
             params["htf_mult"] = row[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1)
             htf = row[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1)
             params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
+    else:
+        with st.expander("플럭스 + EMA 필터 설정", expanded=False):
+            row1 = st.columns(5)
+            params["ltf_len"] = row1[0].number_input("단기 기준 길이", 5, 400, 20, 1)
+            params["ltf_mult"] = row1[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1)
+            params["htf_len"] = row1[2].number_input("상위 주기 길이", 5, 400, 20, 1)
+            params["htf_mult"] = row1[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1)
+            htf = row1[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1, key="bt_flux_ema_htf_rule")
+            params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
+            row2 = st.columns(4)
+            params["sensitivity"] = row2[0].number_input("민감도", 1, 10, 3, 1, key="bt_flux_ema_sensitivity")
+            params["atr_period"] = row2[1].number_input("ATR 기간", 1, 20, 2, 1, key="bt_flux_ema_atr_period")
+            params["trend_ema_length"] = row2[2].number_input("추세 EMA 길이", 20, 400, 240, 5, key="bt_flux_ema_length")
+            params["use_heikin_ashi"] = row2[3].checkbox("Heikin Ashi 사용", value=False, key="bt_flux_ema_heikin_ashi")
     return strategy_name, params
 
 
@@ -359,7 +377,7 @@ def _present_sweep_results(results: pd.DataFrame, strategy_name: str) -> pd.Data
             "win_rate_pct": "승률",
             "max_drawdown_pct": "최대 낙폭",
         }
-    else:
+    elif strategy_name == "flux_trend":
         ordered = [
             "ltf_len",
             "ltf_mult",
@@ -379,6 +397,39 @@ def _present_sweep_results(results: pd.DataFrame, strategy_name: str) -> pd.Data
             "htf_len": "상위 길이",
             "htf_mult": "상위 배수",
             "htf_rule": "상위 주기",
+            "trades": "거래 수",
+            "buy_signals": "매수 신호 수",
+            "sell_signals": "매도 신호 수",
+            "total_return_pct": "수익률",
+            "win_rate_pct": "승률",
+            "max_drawdown_pct": "최대 낙폭",
+        }
+    else:
+        ordered = [
+            "ltf_len",
+            "ltf_mult",
+            "htf_len",
+            "htf_mult",
+            "htf_rule",
+            "sensitivity",
+            "atr_period",
+            "trend_ema_length",
+            "trades",
+            "buy_signals",
+            "sell_signals",
+            "total_return_pct",
+            "win_rate_pct",
+            "max_drawdown_pct",
+        ]
+        rename_map = {
+            "ltf_len": "단기 길이",
+            "ltf_mult": "단기 배수",
+            "htf_len": "상위 길이",
+            "htf_mult": "상위 배수",
+            "htf_rule": "상위 주기",
+            "sensitivity": "민감도",
+            "atr_period": "ATR 기간",
+            "trend_ema_length": "추세 EMA 길이",
             "trades": "거래 수",
             "buy_signals": "매수 신호 수",
             "sell_signals": "매도 신호 수",
@@ -453,14 +504,23 @@ def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, 
                 col=1,
             )
     else:
-        for column in ["ltf_upper", "ltf_lower", "ltf_basis", "htf_upper", "htf_lower"]:
+        line_colors = {
+            "ltf_upper": "#60a5fa",
+            "ltf_lower": "#38bdf8",
+            "ltf_basis": "#2dd4bf",
+            "htf_upper": "#f59e0b",
+            "htf_lower": "#f97316",
+            "trend_ema": "#fde047",
+            "atr_stop": "#fb7185",
+        }
+        for column in ["ltf_upper", "ltf_lower", "ltf_basis", "htf_upper", "htf_lower", "trend_ema", "atr_stop"]:
             if column in frame:
                 figure.add_trace(
                     go.Scatter(
                         x=frame.index,
                         y=frame[column],
                         name=_SERIES_LABELS.get(column, column),
-                        line={"width": 1.4},
+                        line={"width": 1.4, "color": line_colors.get(column)},
                     ),
                     row=1,
                     col=1,
@@ -597,6 +657,7 @@ def render_backtest():
                     strategy_name=strategy_name,
                     params=strategy_params,
                     flux_indicator=flux_indicator,
+                    flux_indicator_with_ema=flux_indicator_with_ema,
                 )
             except Exception as exc:
                 st.error(f"전략 차트 생성에 실패했습니다: {exc}")
@@ -652,6 +713,8 @@ def render_backtest():
         columns = ["close", "strategy_score", "buy_signal", "sell_signal"]
         if strategy_name == "research_trend":
             columns.extend(["ema_fast", "ema_slow", "adx", "atr"])
+        elif strategy_name == "flux_ema_filter":
+            columns.extend(["strength", "ema_buy", "ema_sell", "flux_buy_signal", "flux_sell_signal"])
         visible = tail[[column for column in columns if column in tail.columns]].rename(
             columns={
                 "close": "종가",
@@ -662,6 +725,11 @@ def render_backtest():
                 "ema_slow": "느린 EMA",
                 "adx": "ADX",
                 "atr": "ATR",
+                "strength": "필터 강도",
+                "ema_buy": "EMA 매수 확인",
+                "ema_sell": "EMA 매도 확인",
+                "flux_buy_signal": "원본 플럭스 매수",
+                "flux_sell_signal": "원본 플럭스 매도",
             }
         )
         st.dataframe(visible, use_container_width=True)
@@ -693,7 +761,7 @@ def render_backtest():
                         float,
                     ),
                 }
-            else:
+            elif strategy_name == "flux_trend":
                 sweep_cols1 = st.columns(3)
                 sweep_cols2 = st.columns(2)
                 grid = {
@@ -715,6 +783,43 @@ def render_backtest():
                     ),
                     "htf_rule": _parse_htf_rule_values(
                         sweep_cols2[1].text_input("상위 주기 후보", "60T, 120T, 240T", key="bt_sweep_htf_rule")
+                    ),
+                }
+            else:
+                sweep_cols1 = st.columns(3)
+                sweep_cols2 = st.columns(3)
+                sweep_cols3 = st.columns(2)
+                grid = {
+                    "ltf_len": _parse_sweep_values(
+                        sweep_cols1[0].text_input("단기 길이 후보", "14, 20", key="bt_sweep_flux_ema_ltf_len"),
+                        int,
+                    ),
+                    "ltf_mult": _parse_sweep_values(
+                        sweep_cols1[1].text_input("단기 배수 후보", "1.5, 2.0", key="bt_sweep_flux_ema_ltf_mult"),
+                        float,
+                    ),
+                    "htf_len": _parse_sweep_values(
+                        sweep_cols1[2].text_input("상위 길이 후보", "20, 30", key="bt_sweep_flux_ema_htf_len"),
+                        int,
+                    ),
+                    "htf_mult": _parse_sweep_values(
+                        sweep_cols2[0].text_input("상위 배수 후보", "2.0, 2.25", key="bt_sweep_flux_ema_htf_mult"),
+                        float,
+                    ),
+                    "htf_rule": _parse_htf_rule_values(
+                        sweep_cols2[1].text_input("상위 주기 후보", "60T, 120T", key="bt_sweep_flux_ema_htf_rule")
+                    ),
+                    "sensitivity": _parse_sweep_values(
+                        sweep_cols2[2].text_input("민감도 후보", "2, 3", key="bt_sweep_flux_ema_sensitivity"),
+                        int,
+                    ),
+                    "atr_period": _parse_sweep_values(
+                        sweep_cols3[0].text_input("ATR 기간 후보", "2, 3", key="bt_sweep_flux_ema_atr_period"),
+                        int,
+                    ),
+                    "trend_ema_length": _parse_sweep_values(
+                        sweep_cols3[1].text_input("추세 EMA 후보", "240", key="bt_sweep_flux_ema_length"),
+                        int,
                     ),
                 }
 
@@ -748,6 +853,7 @@ def render_backtest():
                             fee=fee,
                             slippage_bps=slippage_bps,
                             flux_indicator=flux_indicator,
+                            flux_indicator_with_ema=flux_indicator_with_ema,
                         )
                     st.session_state["bt_sweep_results"] = results
                     st.session_state["bt_sweep_meta"] = {
@@ -774,8 +880,13 @@ def render_backtest():
                     best_cols[2].metric("1위 거래 수", int(best["trades"]))
                     if strategy_name == "research_trend":
                         label = f"EMA {int(best['fast_ema'])}/{int(best['slow_ema'])} · 돌파 {int(best['breakout_window'])}"
-                    else:
+                    elif strategy_name == "flux_trend":
                         label = f"LTF {int(best['ltf_len'])}/{float(best['ltf_mult']):.2f} · HTF {best['htf_rule']}"
+                    else:
+                        label = (
+                            f"LTF {int(best['ltf_len'])}/{float(best['ltf_mult']):.2f} · "
+                            f"EMA {int(best['trend_ema_length'])} · 민감도 {int(best['sensitivity'])}"
+                        )
                     best_cols[3].metric("1위 조합", label)
                     st.dataframe(_present_sweep_results(sweep_results.head(20), strategy_name), use_container_width=True, hide_index=True)
                 else:

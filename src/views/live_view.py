@@ -55,6 +55,7 @@ from worker_control import (
 
 api: UpbitAPI | None = None
 flux_indicator = None
+flux_indicator_with_ema = None
 
 _MARKETS_CACHE = {"data": None, "ts": 0.0}
 _CANDLES_CACHE: dict[tuple[str, str, int], dict[str, object]] = {}
@@ -83,6 +84,10 @@ LIVE_PARAM_WIDGETS = {
     "htf_len": "live_htf_len",
     "htf_mult": "live_htf_mult",
     "htf_rule": "live_htf_rule",
+    "sensitivity": "live_sensitivity",
+    "atr_period": "live_atr_period",
+    "trend_ema_length": "live_trend_ema_length",
+    "use_heikin_ashi": "live_use_heikin_ashi",
     "worker_interval": "live_worker_interval",
 }
 LIVE_RISK_WIDGETS = {
@@ -116,6 +121,10 @@ _SERIES_LABELS = {
     "ltf_basis": "단기 기준선",
     "htf_upper": "상위 상단 밴드",
     "htf_lower": "상위 하단 밴드",
+    "trend_ema": "추세 EMA",
+    "strength": "EMA 필터 강도",
+    "flux_buy_signal": "원본 플럭스 매수",
+    "flux_sell_signal": "원본 플럭스 매도",
 }
 
 
@@ -325,10 +334,11 @@ def _present_startup_status(bundle: dict[str, object]) -> pd.DataFrame:
     return frame
 
 
-def init_api(a: UpbitAPI, flux):
-    global api, flux_indicator
+def init_api(a: UpbitAPI, flux, flux_ext):
+    global api, flux_indicator, flux_indicator_with_ema
     api = a
     flux_indicator = flux
+    flux_indicator_with_ema = flux_ext
 
 
 def _markets_rank() -> pd.DataFrame:
@@ -561,6 +571,10 @@ def _managed_worker_config_from_live_params(params: dict) -> dict:
         "htf_len",
         "htf_mult",
         "htf_rule",
+        "sensitivity",
+        "atr_period",
+        "trend_ema_length",
+        "use_heikin_ashi",
     ]:
         if field in params:
             base[field] = params[field]
@@ -850,6 +864,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                 strategy_name=strategy_name,
                 params=params,
                 flux_indicator=flux_indicator,
+                flux_indicator_with_ema=flux_indicator_with_ema,
             )
         except Exception as exc:
             result_rows.append({"market": market, "last_signal": "WAIT", "error": repr(exc)})
@@ -1281,7 +1296,7 @@ class _Worker:
 
 
 def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
-    options = strategy_options(flux_indicator is not None)
+    options = strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
     current = st.session_state.get(f"{prefix}_strategy_name", options[0])
     index = options.index(current) if current in options else 0
     strategy_name = st.selectbox("전략", options, index=index, format_func=strategy_label, key=f"{prefix}_strategy_name")
@@ -1303,7 +1318,7 @@ def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
             params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1, key=f"{prefix}_momentum")
             params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1, key=f"{prefix}_volume_window")
             params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key=f"{prefix}_volume_threshold")
-    else:
+    elif strategy_name == "flux_trend":
         with st.expander("플럭스 추세 밴드 설정", expanded=False):
             row = st.columns(5)
             params["ltf_len"] = row[0].number_input("단기 기준 길이", 5, 400, 20, 1, key=f"{prefix}_ltf_len")
@@ -1312,6 +1327,20 @@ def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
             params["htf_mult"] = row[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1, key=f"{prefix}_htf_mult")
             htf = row[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1, key=f"{prefix}_htf_rule")
             params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
+    else:
+        with st.expander("플럭스 + EMA 필터 설정", expanded=False):
+            row1 = st.columns(5)
+            params["ltf_len"] = row1[0].number_input("단기 기준 길이", 5, 400, 20, 1, key=f"{prefix}_ltf_len")
+            params["ltf_mult"] = row1[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1, key=f"{prefix}_ltf_mult")
+            params["htf_len"] = row1[2].number_input("상위 주기 길이", 5, 400, 20, 1, key=f"{prefix}_htf_len")
+            params["htf_mult"] = row1[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1, key=f"{prefix}_htf_mult")
+            htf = row1[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1, key=f"{prefix}_htf_rule")
+            params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
+            row2 = st.columns(4)
+            params["sensitivity"] = row2[0].number_input("민감도", 1, 10, 3, 1, key=f"{prefix}_sensitivity")
+            params["atr_period"] = row2[1].number_input("ATR 기간", 1, 20, 2, 1, key=f"{prefix}_atr_period")
+            params["trend_ema_length"] = row2[2].number_input("추세 EMA 길이", 20, 400, 240, 5, key=f"{prefix}_trend_ema_length")
+            params["use_heikin_ashi"] = row2[3].checkbox("Heikin Ashi 사용", value=False, key=f"{prefix}_use_heikin_ashi")
     return strategy_name, params
 
 
@@ -1376,10 +1405,24 @@ def _render_chart(
                 col=1,
             )
     else:
-        for column in ["ltf_upper", "ltf_lower", "ltf_basis", "htf_upper", "htf_lower"]:
+        line_colors = {
+            "ltf_upper": "#60a5fa",
+            "ltf_lower": "#38bdf8",
+            "ltf_basis": "#2dd4bf",
+            "htf_upper": "#f59e0b",
+            "htf_lower": "#f97316",
+            "trend_ema": "#fde047",
+            "atr_stop": "#fb7185",
+        }
+        for column in ["ltf_upper", "ltf_lower", "ltf_basis", "htf_upper", "htf_lower", "trend_ema", "atr_stop"]:
             if column in frame:
                 figure.add_trace(
-                    go.Scatter(x=frame.index, y=frame[column], name=_SERIES_LABELS.get(column, column), line={"width": 1.2}),
+                    go.Scatter(
+                        x=frame.index,
+                        y=frame[column],
+                        name=_SERIES_LABELS.get(column, column),
+                        line={"width": 1.2, "color": line_colors.get(column)},
+                    ),
                     row=1,
                     col=1,
                 )
