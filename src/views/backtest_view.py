@@ -11,7 +11,7 @@ from strategy import (
     parameter_grid_size,
     sweep_research_trend_parameters,
 )
-from strategy_engine import build_strategy_frame, strategy_description, strategy_label, strategy_options
+from strategy_engine import build_strategy_frame, strategy_description, strategy_label, strategy_options, sweep_strategy_parameters
 from ui_theme import apply_chart_theme, page_intro
 from upbit_api import UpbitAPI
 from utils.formatters import fmt_full_number
@@ -255,6 +255,33 @@ def _parse_sweep_values(raw: str, caster):
     return deduped
 
 
+def _normalize_htf_rule(value: str) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    if text.endswith("MIN"):
+        return f"{text[:-3]}T"
+    if text.endswith("M") and text[:-1].isdigit():
+        return f"{text[:-1]}T"
+    if text.endswith("T") and text[:-1].isdigit():
+        return text
+    if text.endswith("D") and text[:-1].isdigit():
+        return text
+    return text
+
+
+def _parse_htf_rule_values(raw: str) -> list[str]:
+    values = []
+    seen: set[str] = set()
+    for chunk in str(raw or "").split(","):
+        normalized = _normalize_htf_rule(chunk)
+        if not normalized or normalized in seen:
+            continue
+        values.append(normalized)
+        seen.add(normalized)
+    return values
+
+
 def _format_signal_time(index_value) -> str:
     if index_value is None:
         return "-"
@@ -300,27 +327,26 @@ def _research_condition_table(frame: pd.DataFrame, params: dict[str, float | int
     return pd.DataFrame(rows)
 
 
-def _present_sweep_results(results: pd.DataFrame) -> pd.DataFrame:
+def _present_sweep_results(results: pd.DataFrame, strategy_name: str) -> pd.DataFrame:
     visible = results.copy()
     for column in ["total_return_pct", "win_rate_pct", "max_drawdown_pct"]:
         if column in visible.columns:
             visible[column] = visible[column].apply(lambda value: f"{float(value):.2f}%")
-    ordered = [
-        "fast_ema",
-        "slow_ema",
-        "breakout_window",
-        "atr_mult",
-        "adx_threshold",
-        "trades",
-        "buy_signals",
-        "sell_signals",
-        "total_return_pct",
-        "win_rate_pct",
-        "max_drawdown_pct",
-    ]
-    columns = [column for column in ordered if column in visible.columns]
-    return visible[columns].rename(
-        columns={
+    if strategy_name == "research_trend":
+        ordered = [
+            "fast_ema",
+            "slow_ema",
+            "breakout_window",
+            "atr_mult",
+            "adx_threshold",
+            "trades",
+            "buy_signals",
+            "sell_signals",
+            "total_return_pct",
+            "win_rate_pct",
+            "max_drawdown_pct",
+        ]
+        rename_map = {
             "fast_ema": "빠른 EMA",
             "slow_ema": "느린 EMA",
             "breakout_window": "돌파 창",
@@ -333,7 +359,35 @@ def _present_sweep_results(results: pd.DataFrame) -> pd.DataFrame:
             "win_rate_pct": "승률",
             "max_drawdown_pct": "최대 낙폭",
         }
-    )
+    else:
+        ordered = [
+            "ltf_len",
+            "ltf_mult",
+            "htf_len",
+            "htf_mult",
+            "htf_rule",
+            "trades",
+            "buy_signals",
+            "sell_signals",
+            "total_return_pct",
+            "win_rate_pct",
+            "max_drawdown_pct",
+        ]
+        rename_map = {
+            "ltf_len": "단기 길이",
+            "ltf_mult": "단기 배수",
+            "htf_len": "상위 길이",
+            "htf_mult": "상위 배수",
+            "htf_rule": "상위 주기",
+            "trades": "거래 수",
+            "buy_signals": "매수 신호 수",
+            "sell_signals": "매도 신호 수",
+            "total_return_pct": "수익률",
+            "win_rate_pct": "승률",
+            "max_drawdown_pct": "최대 낙폭",
+        }
+    columns = [column for column in ordered if column in visible.columns]
+    return visible[columns].rename(columns=rename_map)
 
 
 def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, object]):
@@ -612,73 +666,117 @@ def render_backtest():
         )
         st.dataframe(visible, use_container_width=True)
 
-        if strategy_name == "research_trend":
-            with st.expander("파라미터 스윕", expanded=False):
-                st.caption("현재 선택한 종목과 주기로 여러 조합을 자동 비교합니다. 기본값은 현재 전략 설정을 기준으로 합니다.")
+        with st.expander("파라미터 스윕", expanded=False):
+            st.caption("현재 선택한 종목과 주기로 여러 조합을 자동 비교합니다. 기본값은 현재 전략 설정을 기준으로 합니다.")
+            if strategy_name == "research_trend":
                 sweep_cols1 = st.columns(3)
                 sweep_cols2 = st.columns(2)
-                fast_candidates = _parse_sweep_values(
-                    sweep_cols1[0].text_input("빠른 EMA 후보", "12, 21, 34", key="bt_sweep_fast_ema"),
-                    int,
-                )
-                slow_candidates = _parse_sweep_values(
-                    sweep_cols1[1].text_input("느린 EMA 후보", "55, 89", key="bt_sweep_slow_ema"),
-                    int,
-                )
-                breakout_candidates = _parse_sweep_values(
-                    sweep_cols1[2].text_input("돌파 창 후보", "14, 20, 28", key="bt_sweep_breakout"),
-                    int,
-                )
-                atr_mult_candidates = _parse_sweep_values(
-                    sweep_cols2[0].text_input("ATR 배수 후보", "2.0, 2.5, 3.0", key="bt_sweep_atr_mult"),
-                    float,
-                )
-                adx_candidates = _parse_sweep_values(
-                    sweep_cols2[1].text_input("ADX 기준 후보", "16, 18, 20", key="bt_sweep_adx_threshold"),
-                    float,
-                )
                 grid = {
-                    "fast_ema": fast_candidates,
-                    "slow_ema": slow_candidates,
-                    "breakout_window": breakout_candidates,
-                    "atr_mult": atr_mult_candidates,
-                    "adx_threshold": adx_candidates,
+                    "fast_ema": _parse_sweep_values(
+                        sweep_cols1[0].text_input("빠른 EMA 후보", "12, 21, 34", key="bt_sweep_fast_ema"),
+                        int,
+                    ),
+                    "slow_ema": _parse_sweep_values(
+                        sweep_cols1[1].text_input("느린 EMA 후보", "55, 89", key="bt_sweep_slow_ema"),
+                        int,
+                    ),
+                    "breakout_window": _parse_sweep_values(
+                        sweep_cols1[2].text_input("돌파 창 후보", "14, 20, 28", key="bt_sweep_breakout"),
+                        int,
+                    ),
+                    "atr_mult": _parse_sweep_values(
+                        sweep_cols2[0].text_input("ATR 배수 후보", "2.0, 2.5, 3.0", key="bt_sweep_atr_mult"),
+                        float,
+                    ),
+                    "adx_threshold": _parse_sweep_values(
+                        sweep_cols2[1].text_input("ADX 기준 후보", "16, 18, 20", key="bt_sweep_adx_threshold"),
+                        float,
+                    ),
                 }
-                combo_count = parameter_grid_size(grid)
-                st.caption(f"총 조합 수: {combo_count}개")
-                run_sweep = st.button("파라미터 스윕 실행", use_container_width=True)
-                if combo_count == 0:
-                    st.info("후보 값을 한 개 이상 입력해 주세요.")
-                elif combo_count > 240:
-                    st.warning("조합 수가 너무 많습니다. 240개 이하로 줄여 주세요.")
-                elif run_sweep:
-                    raw_frame = st.session_state.get("bt_raw_frame")
-                    if raw_frame is None or raw_frame.empty:
-                        st.warning("먼저 기본 분석을 실행해 주세요.")
-                    else:
+            else:
+                sweep_cols1 = st.columns(3)
+                sweep_cols2 = st.columns(2)
+                grid = {
+                    "ltf_len": _parse_sweep_values(
+                        sweep_cols1[0].text_input("단기 길이 후보", "14, 20, 28", key="bt_sweep_ltf_len"),
+                        int,
+                    ),
+                    "ltf_mult": _parse_sweep_values(
+                        sweep_cols1[1].text_input("단기 배수 후보", "1.5, 2.0, 2.5", key="bt_sweep_ltf_mult"),
+                        float,
+                    ),
+                    "htf_len": _parse_sweep_values(
+                        sweep_cols1[2].text_input("상위 길이 후보", "20, 30, 40", key="bt_sweep_htf_len"),
+                        int,
+                    ),
+                    "htf_mult": _parse_sweep_values(
+                        sweep_cols2[0].text_input("상위 배수 후보", "2.0, 2.25, 2.5", key="bt_sweep_htf_mult"),
+                        float,
+                    ),
+                    "htf_rule": _parse_htf_rule_values(
+                        sweep_cols2[1].text_input("상위 주기 후보", "60T, 120T, 240T", key="bt_sweep_htf_rule")
+                    ),
+                }
+
+            combo_count = parameter_grid_size(grid)
+            st.caption(f"총 조합 수: {combo_count}개")
+            run_sweep = st.button("파라미터 스윕 실행", use_container_width=True)
+            if combo_count == 0:
+                st.info("후보 값을 한 개 이상 입력해 주세요.")
+            elif combo_count > 240:
+                st.warning("조합 수가 너무 많습니다. 240개 이하로 줄여 주세요.")
+            elif run_sweep:
+                raw_frame = st.session_state.get("bt_raw_frame")
+                if raw_frame is None or raw_frame.empty:
+                    st.warning("먼저 기본 분석을 실행해 주세요.")
+                else:
+                    base_params = dict(strategy_params)
+                    if strategy_name == "research_trend":
                         results = sweep_research_trend_parameters(
                             raw_frame,
-                            base_params={key: value for key, value in strategy_params.items() if isinstance(value, (int, float))},
+                            base_params={key: value for key, value in base_params.items() if isinstance(value, (int, float))},
                             candidate_grid=grid,
                             fee=fee,
                             slippage_bps=slippage_bps,
                         )
-                        st.session_state["bt_sweep_results"] = results
-                        st.session_state["bt_sweep_meta"] = {"market": selected_market, "interval": interval, "count": count}
-
-                sweep_results = st.session_state.get("bt_sweep_results")
-                sweep_meta = st.session_state.get("bt_sweep_meta") or {}
-                if isinstance(sweep_results, pd.DataFrame) and not sweep_results.empty:
-                    if sweep_meta.get("market") == selected_market and sweep_meta.get("interval") == interval and int(sweep_meta.get("count") or 0) == count:
-                        best = sweep_results.iloc[0]
-                        best_cols = st.columns(4)
-                        best_cols[0].metric("1위 수익률", f"{float(best['total_return_pct']):.2f}%")
-                        best_cols[1].metric("1위 최대 낙폭", f"{float(best['max_drawdown_pct']):.2f}%")
-                        best_cols[2].metric("1위 거래 수", int(best["trades"]))
-                        best_cols[3].metric(
-                            "1위 조합",
-                            f"EMA {int(best['fast_ema'])}/{int(best['slow_ema'])} · 돌파 {int(best['breakout_window'])}",
-                        )
-                        st.dataframe(_present_sweep_results(sweep_results.head(20)), use_container_width=True, hide_index=True)
                     else:
-                        st.info("종목이나 주기가 바뀌어서 이전 스윕 결과를 숨겼습니다. 다시 실행해 주세요.")
+                        results = sweep_strategy_parameters(
+                            raw_frame,
+                            strategy_name=strategy_name,
+                            base_params=base_params,
+                            candidate_grid=grid,
+                            fee=fee,
+                            slippage_bps=slippage_bps,
+                            flux_indicator=flux_indicator,
+                        )
+                    st.session_state["bt_sweep_results"] = results
+                    st.session_state["bt_sweep_meta"] = {
+                        "market": selected_market,
+                        "interval": interval,
+                        "count": count,
+                        "strategy_name": strategy_name,
+                    }
+
+            sweep_results = st.session_state.get("bt_sweep_results")
+            sweep_meta = st.session_state.get("bt_sweep_meta") or {}
+            if isinstance(sweep_results, pd.DataFrame) and not sweep_results.empty:
+                current_match = (
+                    sweep_meta.get("market") == selected_market
+                    and sweep_meta.get("interval") == interval
+                    and int(sweep_meta.get("count") or 0) == count
+                    and sweep_meta.get("strategy_name") == strategy_name
+                )
+                if current_match:
+                    best = sweep_results.iloc[0]
+                    best_cols = st.columns(4)
+                    best_cols[0].metric("1위 수익률", f"{float(best['total_return_pct']):.2f}%")
+                    best_cols[1].metric("1위 최대 낙폭", f"{float(best['max_drawdown_pct']):.2f}%")
+                    best_cols[2].metric("1위 거래 수", int(best["trades"]))
+                    if strategy_name == "research_trend":
+                        label = f"EMA {int(best['fast_ema'])}/{int(best['slow_ema'])} · 돌파 {int(best['breakout_window'])}"
+                    else:
+                        label = f"LTF {int(best['ltf_len'])}/{float(best['ltf_mult']):.2f} · HTF {best['htf_rule']}"
+                    best_cols[3].metric("1위 조합", label)
+                    st.dataframe(_present_sweep_results(sweep_results.head(20), strategy_name), use_container_width=True, hide_index=True)
+                else:
+                    st.info("종목, 주기, 또는 전략이 바뀌어서 이전 스윕 결과를 숨겼습니다. 다시 실행해 주세요.")

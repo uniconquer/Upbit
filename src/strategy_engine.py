@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from itertools import product
 from typing import Any, Callable
 
 import pandas as pd
 
 try:
-    from strategy import build_research_trend_signals
+    from strategy import backtest_signal_frame, build_research_trend_signals
 except ImportError:
-    from src.strategy import build_research_trend_signals
+    from src.strategy import backtest_signal_frame, build_research_trend_signals
 
 FluxCallable = Callable[..., pd.DataFrame] | None
 
@@ -20,7 +21,7 @@ STRATEGY_LABELS = {
 
 STRATEGY_DESCRIPTIONS = {
     "research_trend": "EMA 정배열, 거래량 동반 돌파, ADX 추세 강도, ATR 이탈 손절을 함께 보는 추세 전략입니다.",
-    "flux_trend": "다중 시간대 밴드와 추세 기준선을 함께 보는 추세 추종 전략입니다.",
+    "flux_trend": "다중 시간대 볼린저 밴드와 칼만 기준선을 함께 보는 반전·재진입형 전략입니다.",
 }
 
 
@@ -81,3 +82,50 @@ def build_strategy_frame(
         return result
 
     raise ValueError(f"unknown strategy: {strategy_name}")
+
+
+def sweep_strategy_parameters(
+    raw: pd.DataFrame,
+    *,
+    strategy_name: str,
+    base_params: dict[str, Any] | None = None,
+    candidate_grid: dict[str, list[Any]] | None = None,
+    fee: float = 0.0005,
+    slippage_bps: float = 3.0,
+    flux_indicator: FluxCallable = None,
+) -> pd.DataFrame:
+    base = dict(base_params or {})
+    grid = {key: list(values) for key, values in dict(candidate_grid or {}).items() if list(values)}
+    if not grid:
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = []
+    keys = list(grid.keys())
+    for combo in product(*(grid[key] for key in keys)):
+        combo_params = dict(zip(keys, combo, strict=False))
+        merged = {**base, **combo_params}
+        frame = build_strategy_frame(
+            raw,
+            strategy_name=strategy_name,
+            params=merged,
+            flux_indicator=flux_indicator,
+        )
+        bt = backtest_signal_frame(frame, fee=fee, slippage_bps=slippage_bps)
+        rows.append(
+            {
+                **combo_params,
+                "trades": int(bt["trades"]),
+                "buy_signals": int(frame["buy_signal"].sum()) if "buy_signal" in frame else 0,
+                "sell_signals": int(frame["sell_signal"].sum()) if "sell_signal" in frame else 0,
+                "total_return_pct": float(bt["total_return_pct"]),
+                "win_rate_pct": float(bt["win_rate_pct"]),
+                "max_drawdown_pct": float(bt["max_drawdown_pct"]),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    results = pd.DataFrame(rows)
+    return results.sort_values(
+        ["total_return_pct", "max_drawdown_pct", "win_rate_pct", "trades"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
