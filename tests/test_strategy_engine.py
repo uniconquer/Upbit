@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.strategy_engine import build_strategy_frame, sweep_strategy_parameters
+from src.strategy_engine import build_strategy_frame, compare_strategy_backtests, sweep_strategy_parameters
 
 
 def _sample_ohlcv() -> pd.DataFrame:
@@ -154,3 +154,31 @@ def test_sweep_strategy_parameters_supports_flux_ema_filter():
 
     assert len(results) == 4
     assert {"sensitivity", "atr_period", "trend_ema_length", "total_return_pct"}.issubset(results.columns)
+
+
+def test_compare_strategy_backtests_ranks_multiple_strategies():
+    results = compare_strategy_backtests(
+        _sample_ohlcv(),
+        strategies=[
+            {"strategy_name": "flux_trend", "params": {"ltf_len": 14, "ltf_mult": 1.5, "htf_len": 20, "htf_mult": 2.0, "htf_rule": "60T"}},
+            {
+                "strategy_name": "flux_ema_filter",
+                "params": {
+                    "ltf_len": 14,
+                    "ltf_mult": 1.5,
+                    "htf_len": 20,
+                    "htf_mult": 2.0,
+                    "htf_rule": "60T",
+                    "sensitivity": 3,
+                    "atr_period": 2,
+                    "trend_ema_length": 180,
+                },
+            },
+        ],
+        flux_indicator=_fake_flux_indicator,
+        flux_indicator_with_ema=_fake_flux_indicator_with_ema,
+    )
+
+    assert len(results) == 2
+    assert {"strategy_name", "strategy_label", "params", "return_pct", "max_drawdown_pct", "last_signal"}.issubset(results.columns)
+    assert set(results["strategy_name"]) == {"flux_trend", "flux_ema_filter"}

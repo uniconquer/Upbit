@@ -11,7 +11,14 @@ from strategy import (
     parameter_grid_size,
     sweep_research_trend_parameters,
 )
-from strategy_engine import build_strategy_frame, strategy_description, strategy_label, strategy_options, sweep_strategy_parameters
+from strategy_engine import (
+    build_strategy_frame,
+    compare_strategy_backtests,
+    strategy_description,
+    strategy_label,
+    strategy_options,
+    sweep_strategy_parameters,
+)
 from ui_theme import apply_chart_theme, page_intro
 from upbit_api import UpbitAPI
 from utils.formatters import fmt_full_number
@@ -51,6 +58,74 @@ _SERIES_LABELS = {
     "strength": "EMA 필터 강도",
     "flux_buy_signal": "원본 플럭스 매수",
     "flux_sell_signal": "원본 플럭스 매도",
+}
+
+_BACKTEST_DEFAULT_PARAMS: dict[str, dict[str, object]] = {
+    "research_trend": {
+        "fast_ema": 21,
+        "slow_ema": 55,
+        "breakout_window": 20,
+        "exit_window": 10,
+        "atr_window": 14,
+        "atr_mult": 2.5,
+        "adx_window": 14,
+        "adx_threshold": 18.0,
+        "momentum_window": 20,
+        "volume_window": 20,
+        "volume_threshold": 0.9,
+    },
+    "flux_trend": {
+        "ltf_len": 20,
+        "ltf_mult": 2.0,
+        "htf_len": 20,
+        "htf_mult": 2.25,
+        "htf_rule": "60T",
+    },
+    "flux_ema_filter": {
+        "ltf_len": 20,
+        "ltf_mult": 2.0,
+        "htf_len": 20,
+        "htf_mult": 2.25,
+        "htf_rule": "60T",
+        "sensitivity": 3,
+        "atr_period": 2,
+        "trend_ema_length": 240,
+        "use_heikin_ashi": False,
+    },
+}
+
+_BACKTEST_WIDGET_KEYS: dict[str, dict[str, str]] = {
+    "research_trend": {
+        "fast_ema": "bt_research_fast_ema",
+        "slow_ema": "bt_research_slow_ema",
+        "breakout_window": "bt_research_breakout_window",
+        "exit_window": "bt_research_exit_window",
+        "atr_window": "bt_research_atr_window",
+        "atr_mult": "bt_research_atr_mult",
+        "adx_window": "bt_research_adx_window",
+        "adx_threshold": "bt_research_adx_threshold",
+        "momentum_window": "bt_research_momentum_window",
+        "volume_window": "bt_research_volume_window",
+        "volume_threshold": "bt_research_volume_threshold",
+    },
+    "flux_trend": {
+        "ltf_len": "bt_flux_ltf_len",
+        "ltf_mult": "bt_flux_ltf_mult",
+        "htf_len": "bt_flux_htf_len",
+        "htf_mult": "bt_flux_htf_mult",
+        "htf_rule": "bt_flux_htf_rule",
+    },
+    "flux_ema_filter": {
+        "ltf_len": "bt_flux_ema_ltf_len",
+        "ltf_mult": "bt_flux_ema_ltf_mult",
+        "htf_len": "bt_flux_ema_htf_len",
+        "htf_mult": "bt_flux_ema_htf_mult",
+        "htf_rule": "bt_flux_ema_htf_rule",
+        "sensitivity": "bt_flux_ema_sensitivity",
+        "atr_period": "bt_flux_ema_atr_period",
+        "trend_ema_length": "bt_flux_ema_length",
+        "use_heikin_ashi": "bt_flux_ema_heikin_ashi",
+    },
 }
 
 
@@ -214,35 +289,35 @@ def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
     if strategy_name == "research_trend":
         with st.expander("연구형 추세 돌파 설정", expanded=False):
             row1 = st.columns(4)
-            params["fast_ema"] = row1[0].number_input("빠른 EMA", 5, 100, 21, 1)
-            params["slow_ema"] = row1[1].number_input("느린 EMA", 10, 240, 55, 1)
-            params["breakout_window"] = row1[2].number_input("돌파 창", 5, 120, 20, 1)
-            params["exit_window"] = row1[3].number_input("청산 창", 3, 80, 10, 1)
+            params["fast_ema"] = row1[0].number_input("빠른 EMA", 5, 100, 21, 1, key="bt_research_fast_ema")
+            params["slow_ema"] = row1[1].number_input("느린 EMA", 10, 240, 55, 1, key="bt_research_slow_ema")
+            params["breakout_window"] = row1[2].number_input("돌파 창", 5, 120, 20, 1, key="bt_research_breakout_window")
+            params["exit_window"] = row1[3].number_input("청산 창", 3, 80, 10, 1, key="bt_research_exit_window")
             row2 = st.columns(4)
-            params["atr_window"] = row2[0].number_input("ATR 창", 5, 50, 14, 1)
-            params["atr_mult"] = row2[1].number_input("ATR 배수", 1.0, 6.0, 2.5, 0.1)
-            params["adx_window"] = row2[2].number_input("ADX 창", 5, 50, 14, 1)
-            params["adx_threshold"] = row2[3].number_input("ADX 기준", 5.0, 40.0, 18.0, 0.5)
+            params["atr_window"] = row2[0].number_input("ATR 창", 5, 50, 14, 1, key="bt_research_atr_window")
+            params["atr_mult"] = row2[1].number_input("ATR 배수", 1.0, 6.0, 2.5, 0.1, key="bt_research_atr_mult")
+            params["adx_window"] = row2[2].number_input("ADX 창", 5, 50, 14, 1, key="bt_research_adx_window")
+            params["adx_threshold"] = row2[3].number_input("ADX 기준", 5.0, 40.0, 18.0, 0.5, key="bt_research_adx_threshold")
             row3 = st.columns(3)
-            params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1)
-            params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1)
-            params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1)
+            params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1, key="bt_research_momentum_window")
+            params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1, key="bt_research_volume_window")
+            params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key="bt_research_volume_threshold")
     elif strategy_name == "flux_trend":
         with st.expander("플럭스 추세 밴드 설정", expanded=False):
             row = st.columns(5)
-            params["ltf_len"] = row[0].number_input("단기 기준 길이", 5, 400, 20, 1)
-            params["ltf_mult"] = row[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1)
-            params["htf_len"] = row[2].number_input("상위 주기 길이", 5, 400, 20, 1)
-            params["htf_mult"] = row[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1)
-            htf = row[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1)
+            params["ltf_len"] = row[0].number_input("단기 기준 길이", 5, 400, 20, 1, key="bt_flux_ltf_len")
+            params["ltf_mult"] = row[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1, key="bt_flux_ltf_mult")
+            params["htf_len"] = row[2].number_input("상위 주기 길이", 5, 400, 20, 1, key="bt_flux_htf_len")
+            params["htf_mult"] = row[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1, key="bt_flux_htf_mult")
+            htf = row[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1, key="bt_flux_htf_rule")
             params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
     else:
         with st.expander("플럭스 + EMA 필터 설정", expanded=False):
             row1 = st.columns(5)
-            params["ltf_len"] = row1[0].number_input("단기 기준 길이", 5, 400, 20, 1)
-            params["ltf_mult"] = row1[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1)
-            params["htf_len"] = row1[2].number_input("상위 주기 길이", 5, 400, 20, 1)
-            params["htf_mult"] = row1[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1)
+            params["ltf_len"] = row1[0].number_input("단기 기준 길이", 5, 400, 20, 1, key="bt_flux_ema_ltf_len")
+            params["ltf_mult"] = row1[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1, key="bt_flux_ema_ltf_mult")
+            params["htf_len"] = row1[2].number_input("상위 주기 길이", 5, 400, 20, 1, key="bt_flux_ema_htf_len")
+            params["htf_mult"] = row1[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1, key="bt_flux_ema_htf_mult")
             htf = row1[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1, key="bt_flux_ema_htf_rule")
             params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
             row2 = st.columns(4)
@@ -298,6 +373,124 @@ def _parse_htf_rule_values(raw: str) -> list[str]:
         values.append(normalized)
         seen.add(normalized)
     return values
+
+
+def _htf_rule_to_widget(value: object) -> str:
+    normalized = _normalize_htf_rule(str(value or ""))
+    if normalized.endswith("T") and normalized[:-1].isdigit():
+        return f"{normalized[:-1]}m"
+    return normalized or "60m"
+
+
+def _signal_label(value: object) -> str:
+    mapping = {
+        "BUY": "매수",
+        "SELL": "매도",
+        "WAIT": "대기",
+    }
+    return mapping.get(str(value or "").upper(), str(value or "-"))
+
+
+def _strategy_param_summary(strategy_name: str, params: dict[str, object]) -> str:
+    if strategy_name == "research_trend":
+        return (
+            f"EMA {int(params.get('fast_ema', 21))}/{int(params.get('slow_ema', 55))} · "
+            f"돌파 {int(params.get('breakout_window', 20))} · ADX {float(params.get('adx_threshold', 18.0)):.1f}"
+        )
+    if strategy_name == "flux_trend":
+        return (
+            f"LTF {int(params.get('ltf_len', 20))}/{float(params.get('ltf_mult', 2.0)):.2f} · "
+            f"HTF {params.get('htf_rule', '60T')}"
+        )
+    return (
+        f"LTF {int(params.get('ltf_len', 20))}/{float(params.get('ltf_mult', 2.0)):.2f} · "
+        f"HTF {params.get('htf_rule', '60T')} · EMA {int(params.get('trend_ema_length', 240))} · "
+        f"민감도 {int(params.get('sensitivity', 3))}"
+    )
+
+
+def _coerce_param_value(value: object, default: object) -> object:
+    if isinstance(default, bool):
+        return str(value).strip().lower() in {"1", "true", "yes", "on"} if value is not None else bool(default)
+    if isinstance(default, int):
+        try:
+            return int(float(value))
+        except Exception:
+            return int(default)
+    if isinstance(default, float):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+    if default == "60T" or str(default).endswith(("T", "D")):
+        normalized = _normalize_htf_rule(str(value or default))
+        return normalized or default
+    return value if value is not None else default
+
+
+def _params_for_strategy(strategy_name: str) -> dict[str, object]:
+    defaults = dict(_BACKTEST_DEFAULT_PARAMS.get(strategy_name, {}))
+    widgets = _BACKTEST_WIDGET_KEYS.get(strategy_name, {})
+    params: dict[str, object] = {}
+    for field, default in defaults.items():
+        raw_value = st.session_state.get(widgets.get(field, ""), default)
+        params[field] = _coerce_param_value(raw_value, default)
+    return params
+
+
+def _apply_params_to_widgets(strategy_name: str, params: dict[str, object]) -> None:
+    widgets = _BACKTEST_WIDGET_KEYS.get(strategy_name, {})
+    defaults = _BACKTEST_DEFAULT_PARAMS.get(strategy_name, {})
+    for field, key in widgets.items():
+        if not key:
+            continue
+        default = defaults.get(field)
+        value = params.get(field, default)
+        if field == "htf_rule":
+            st.session_state[key] = _htf_rule_to_widget(value)
+        else:
+            st.session_state[key] = _coerce_param_value(value, default)
+
+
+def _present_compare_results(results: pd.DataFrame) -> pd.DataFrame:
+    visible = results.copy()
+    if "score" in visible.columns:
+        visible["score"] = visible["score"].apply(lambda value: f"{float(value):.2f}")
+    for column in ["return_pct", "win_rate_pct", "max_drawdown_pct"]:
+        if column in visible.columns:
+            visible[column] = visible[column].apply(lambda value: f"{float(value):.2f}%")
+    if "last_signal" in visible.columns:
+        visible["last_signal"] = visible["last_signal"].apply(_signal_label)
+    if "params" in visible.columns:
+        visible["설정 요약"] = visible.apply(
+            lambda row: _strategy_param_summary(str(row.get("strategy_name") or ""), dict(row.get("params") or {})),
+            axis=1,
+        )
+    ordered = [
+        "strategy_label",
+        "설정 요약",
+        "trades",
+        "buy_signals",
+        "sell_signals",
+        "return_pct",
+        "win_rate_pct",
+        "max_drawdown_pct",
+        "last_signal",
+        "score",
+    ]
+    return visible[[column for column in ordered if column in visible.columns]].rename(
+        columns={
+            "strategy_label": "전략",
+            "trades": "거래 수",
+            "buy_signals": "매수 신호 수",
+            "sell_signals": "매도 신호 수",
+            "return_pct": "수익률",
+            "win_rate_pct": "승률",
+            "max_drawdown_pct": "최대 낙폭",
+            "last_signal": "현재 신호",
+            "score": "전략 점수",
+        }
+    )
 
 
 def _format_signal_time(index_value) -> str:
@@ -630,6 +823,10 @@ def render_backtest():
         slippage_bps = float(control_col4.number_input("슬리피지 (bps)", 0.0, 100.0, 3.0, 0.5))
         auto_run = control_col5.checkbox("자동 갱신", value=True)
         strategy_name, strategy_params = _strategy_controls()
+        notice = st.session_state.pop("bt_apply_notice", "")
+        if notice:
+            st.success(str(notice))
+        force_run = bool(st.session_state.pop("bt_force_run", False))
         run_now = st.button("분석 실행", use_container_width=True)
 
         if not selected_market:
@@ -646,7 +843,7 @@ def render_backtest():
             "strategy_name": strategy_name,
             "strategy_params": strategy_params,
         }
-        if run_now or (auto_run and previous_key != current_key):
+        if run_now or force_run or (auto_run and previous_key != current_key):
             raw = _candles(selected_market, interval, count)
             if raw.empty:
                 st.warning("해당 종목의 캔들 데이터를 불러오지 못했습니다.")
@@ -665,8 +862,6 @@ def render_backtest():
             st.session_state["bt_raw_frame"] = raw[["open", "high", "low", "close", "volume"]].copy()
             st.session_state["bt_frame"] = frame
             st.session_state["bt_context"] = current_key
-            st.session_state.pop("bt_sweep_results", None)
-            st.session_state.pop("bt_sweep_meta", None)
 
         frame = st.session_state.get("bt_frame")
         if frame is None or frame.empty:
@@ -733,6 +928,56 @@ def render_backtest():
             }
         )
         st.dataframe(visible, use_container_width=True)
+
+        with st.expander("전략 비교 랭킹", expanded=False):
+            st.caption("같은 종목과 주기에서 전략별 현재 설정을 한 번에 백테스트해 순위를 비교합니다.")
+            run_compare = st.button("전략 비교 실행", use_container_width=True)
+            if run_compare:
+                raw_frame = st.session_state.get("bt_raw_frame")
+                if raw_frame is None or raw_frame.empty:
+                    st.warning("먼저 기본 분석을 실행해 주세요.")
+                else:
+                    compare_results = compare_strategy_backtests(
+                        raw_frame,
+                        strategies=[
+                            {"strategy_name": name, "params": _params_for_strategy(name)}
+                            for name in strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
+                        ],
+                        fee=fee,
+                        slippage_bps=slippage_bps,
+                        flux_indicator=flux_indicator,
+                        flux_indicator_with_ema=flux_indicator_with_ema,
+                    )
+                    st.session_state["bt_compare_results"] = compare_results
+                    st.session_state["bt_compare_meta"] = {
+                        "market": selected_market,
+                        "interval": interval,
+                        "count": count,
+                        "fee": fee,
+                        "slippage_bps": slippage_bps,
+                    }
+
+            compare_results = st.session_state.get("bt_compare_results")
+            compare_meta = st.session_state.get("bt_compare_meta") or {}
+            if isinstance(compare_results, pd.DataFrame) and not compare_results.empty:
+                compare_match = (
+                    compare_meta.get("market") == selected_market
+                    and compare_meta.get("interval") == interval
+                    and int(compare_meta.get("count") or 0) == count
+                    and float(compare_meta.get("fee") or 0.0) == fee
+                    and float(compare_meta.get("slippage_bps") or 0.0) == slippage_bps
+                )
+                if compare_match:
+                    top = compare_results.iloc[0]
+                    top_params = dict(top.get("params") or {})
+                    compare_cols = st.columns(4)
+                    compare_cols[0].metric("1위 전략", str(top.get("strategy_label") or "-"))
+                    compare_cols[1].metric("1위 수익률", f"{float(top.get('return_pct') or 0.0):.2f}%")
+                    compare_cols[2].metric("1위 최대 낙폭", f"{float(top.get('max_drawdown_pct') or 0.0):.2f}%")
+                    compare_cols[3].metric("1위 설정", _strategy_param_summary(str(top.get("strategy_name") or ""), top_params))
+                    st.dataframe(_present_compare_results(compare_results), use_container_width=True, hide_index=True)
+                else:
+                    st.info("종목이나 주기가 바뀌어서 이전 비교 결과를 숨겼습니다. 다시 실행해 주세요.")
 
         with st.expander("파라미터 스윕", expanded=False):
             st.caption("현재 선택한 종목과 주기로 여러 조합을 자동 비교합니다. 기본값은 현재 전략 설정을 기준으로 합니다.")
@@ -861,6 +1106,8 @@ def render_backtest():
                         "interval": interval,
                         "count": count,
                         "strategy_name": strategy_name,
+                        "fee": fee,
+                        "slippage_bps": slippage_bps,
                     }
 
             sweep_results = st.session_state.get("bt_sweep_results")
@@ -871,6 +1118,8 @@ def render_backtest():
                     and sweep_meta.get("interval") == interval
                     and int(sweep_meta.get("count") or 0) == count
                     and sweep_meta.get("strategy_name") == strategy_name
+                    and float(sweep_meta.get("fee") or 0.0) == fee
+                    and float(sweep_meta.get("slippage_bps") or 0.0) == slippage_bps
                 )
                 if current_match:
                     best = sweep_results.iloc[0]
@@ -888,6 +1137,11 @@ def render_backtest():
                             f"EMA {int(best['trend_ema_length'])} · 민감도 {int(best['sensitivity'])}"
                         )
                     best_cols[3].metric("1위 조합", label)
+                    if st.button("1위 설정을 현재 전략에 적용", key=f"bt_apply_best_{strategy_name}", use_container_width=True):
+                        _apply_params_to_widgets(strategy_name, best.to_dict())
+                        st.session_state["bt_apply_notice"] = f"{strategy_label(strategy_name)} 1위 조합을 현재 설정에 반영했습니다."
+                        st.session_state["bt_force_run"] = True
+                        st.rerun()
                     st.dataframe(_present_sweep_results(sweep_results.head(20), strategy_name), use_container_width=True, hide_index=True)
                 else:
                     st.info("종목, 주기, 또는 전략이 바뀌어서 이전 스윕 결과를 숨겼습니다. 다시 실행해 주세요.")

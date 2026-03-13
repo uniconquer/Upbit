@@ -188,3 +188,63 @@ def sweep_strategy_parameters(
         ["total_return_pct", "max_drawdown_pct", "win_rate_pct", "trades"],
         ascending=[False, False, False, False],
     ).reset_index(drop=True)
+
+
+def _last_signal_code(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return "WAIT"
+    last_row = frame.iloc[-1]
+    if bool(last_row.get("buy_signal")):
+        return "BUY"
+    if bool(last_row.get("sell_signal")):
+        return "SELL"
+    return "WAIT"
+
+
+def compare_strategy_backtests(
+    raw: pd.DataFrame,
+    *,
+    strategies: list[dict[str, Any]],
+    fee: float = 0.0005,
+    slippage_bps: float = 3.0,
+    flux_indicator: FluxCallable = None,
+    flux_indicator_with_ema: FluxCallable = None,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for spec in strategies:
+        strategy_name = str(spec.get("strategy_name") or "")
+        if not strategy_name:
+            continue
+        params = dict(spec.get("params") or {})
+        frame = build_strategy_frame(
+            raw,
+            strategy_name=strategy_name,
+            params=params,
+            flux_indicator=flux_indicator,
+            flux_indicator_with_ema=flux_indicator_with_ema,
+        )
+        bt = backtest_signal_frame(frame, fee=fee, slippage_bps=slippage_bps)
+        last_row = frame.iloc[-1] if not frame.empty else pd.Series(dtype=object)
+        rows.append(
+            {
+                "strategy_name": strategy_name,
+                "strategy_label": strategy_label(strategy_name),
+                "params": params,
+                "score": float(last_row.get("strategy_score", 0.0)),
+                "price": float(last_row.get("close", 0.0)),
+                "trades": int(bt["trades"]),
+                "buy_signals": int(frame["buy_signal"].sum()) if "buy_signal" in frame else 0,
+                "sell_signals": int(frame["sell_signal"].sum()) if "sell_signal" in frame else 0,
+                "return_pct": float(bt["total_return_pct"]),
+                "win_rate_pct": float(bt["win_rate_pct"]),
+                "max_drawdown_pct": float(bt["max_drawdown_pct"]),
+                "last_signal": _last_signal_code(frame),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    results = pd.DataFrame(rows)
+    return results.sort_values(
+        ["return_pct", "max_drawdown_pct", "win_rate_pct", "trades"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
