@@ -8,9 +8,23 @@ from upbit_api import UpbitAPI
 try:
     from telegram_control import run_control_loop
     from worker_control import format_worker_status, load_managed_worker_status, start_managed_worker, stop_managed_worker
+    from startup_automation import (
+        format_startup_status_bundle,
+        install_startup_task,
+        load_startup_status_bundle,
+        remove_startup_task,
+        run_startup_task,
+    )
 except ImportError:
     from src.telegram_control import run_control_loop
     from src.worker_control import format_worker_status, load_managed_worker_status, start_managed_worker, stop_managed_worker
+    from src.startup_automation import (
+        format_startup_status_bundle,
+        install_startup_task,
+        load_startup_status_bundle,
+        remove_startup_task,
+        run_startup_task,
+    )
 
 
 def cmd_markets(api: UpbitAPI, base: str = "KRW", limit: int = 5):
@@ -102,6 +116,18 @@ def main():
     p9 = sub.add_parser('telegram-control')
     p9.add_argument('--poll-timeout', type=int, default=25)
 
+    p10 = sub.add_parser('startup-status')
+    p10.add_argument('--target', choices=['all', 'worker', 'telegram'], default='all')
+
+    p11 = sub.add_parser('startup-install')
+    p11.add_argument('--target', choices=['all', 'worker', 'telegram'], default='all')
+
+    p12 = sub.add_parser('startup-remove')
+    p12.add_argument('--target', choices=['all', 'worker', 'telegram'], default='all')
+
+    p13 = sub.add_parser('startup-run')
+    p13.add_argument('--target', choices=['all', 'worker', 'telegram'], default='all')
+
     args = parser.parse_args()
     api = UpbitAPI(access_key=os.getenv('UPBIT_ACCESS_KEY'), secret_key=os.getenv('UPBIT_SECRET_KEY'))
 
@@ -127,6 +153,35 @@ def main():
         print(format_worker_status(stop_managed_worker()))
     elif args.cmd == 'telegram-control':
         run_control_loop(poll_timeout=args.poll_timeout)
+    elif args.cmd == 'startup-status':
+        bundle = load_startup_status_bundle()
+        if args.target != 'all':
+            bundle['tasks'] = {args.target: (bundle.get('tasks') or {}).get(args.target)}
+        print(format_startup_status_bundle(bundle))
+    elif args.cmd == 'startup-install':
+        targets = ['worker', 'telegram'] if args.target == 'all' else [args.target]
+        for target in targets:
+            install_startup_task(target)
+        bundle = load_startup_status_bundle()
+        if args.target != 'all':
+            bundle['tasks'] = {args.target: (bundle.get('tasks') or {}).get(args.target)}
+        print(format_startup_status_bundle(bundle))
+    elif args.cmd == 'startup-remove':
+        targets = ['worker', 'telegram'] if args.target == 'all' else [args.target]
+        for target in targets:
+            remove_startup_task(target)
+        bundle = load_startup_status_bundle()
+        if args.target != 'all':
+            bundle['tasks'] = {args.target: (bundle.get('tasks') or {}).get(args.target)}
+        print(format_startup_status_bundle(bundle))
+    elif args.cmd == 'startup-run':
+        targets = ['worker', 'telegram'] if args.target == 'all' else [args.target]
+        for target in targets:
+            run_startup_task(target)
+        bundle = load_startup_status_bundle()
+        if args.target != 'all':
+            bundle['tasks'] = {args.target: (bundle.get('tasks') or {}).get(args.target)}
+        print(format_startup_status_bundle(bundle))
 
 
 if __name__ == '__main__':

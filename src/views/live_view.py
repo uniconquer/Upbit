@@ -32,6 +32,13 @@ from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_
 from runtime_store import load_runtime_state, save_runtime_state
 from strategy import backtest_signal_frame
 from strategy_engine import build_strategy_frame, strategy_description, strategy_label, strategy_options
+from startup_automation import (
+    format_startup_status_bundle,
+    install_startup_task,
+    load_startup_status_bundle,
+    remove_startup_task,
+    startup_supported,
+)
 from trading_costs import TradingCostModel, cost_model_from_values
 from ui_theme import apply_chart_theme, page_intro
 from upbit_api import UpbitAPI
@@ -284,6 +291,38 @@ def _present_trade_log(logs: list[dict[str, object]]) -> pd.DataFrame:
             "strategy": "전략",
         }
     )
+
+
+def _present_startup_status(bundle: dict[str, object]) -> pd.DataFrame:
+    tasks = dict(bundle.get("tasks") or {})
+    rows = []
+    for component in ["worker", "telegram"]:
+        snapshot = dict(tasks.get(component) or {})
+        if not snapshot:
+            continue
+        rows.append(
+            {
+                "대상": snapshot.get("label") or component,
+                "설치": "예" if snapshot.get("exists") else "아니오",
+                "활성": "ON" if snapshot.get("enabled") else "OFF",
+                "상태": snapshot.get("state") or "-",
+                "구성 확인": "정상" if snapshot.get("configured") else "확인 필요",
+                "다음 실행": snapshot.get("next_run_time") or "-",
+                "마지막 실행": snapshot.get("last_run_time") or "-",
+            }
+        )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    for column in ["다음 실행", "마지막 실행"]:
+        frame[column] = frame[column].apply(
+            lambda value: (
+                pd.to_datetime(float(value), unit="s").tz_localize("UTC").tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S")
+                if isinstance(value, (int, float)) and float(value) > 0
+                else "-"
+            )
+        )
+    return frame
 
 
 def init_api(a: UpbitAPI, flux):
@@ -1562,6 +1601,58 @@ def render_live():
         if log_tail:
             with st.expander("최근 CLI 로그", expanded=False):
                 st.code(log_tail, language="text")
+
+    with st.expander("Windows 자동 시작", expanded=False):
+        if not startup_supported():
+            st.info("이 기능은 Windows에서만 지원됩니다.")
+        else:
+            startup_bundle = load_startup_status_bundle()
+            startup_table = _present_startup_status(startup_bundle)
+            if not startup_table.empty:
+                st.dataframe(startup_table, use_container_width=True, hide_index=True)
+            st.code(format_startup_status_bundle(startup_bundle), language="text")
+            st.caption("로그인 시 자동 시작되도록 예약 작업을 설치합니다. 절전모드에서는 계속 실행되지 않습니다.")
+
+            install_cols = st.columns(3)
+            if install_cols[0].button("워커 자동시작 설치", use_container_width=True):
+                result = install_startup_task("worker")
+                st.session_state["LIVE_STARTUP_NOTICE"] = (
+                    "워커 자동 시작을 설치했습니다." if result.get("ok") else f"워커 자동 시작 설치 실패: {result.get('stderr') or result.get('stdout') or '원인 미상'}"
+                )
+            if install_cols[1].button("텔레그램 자동시작 설치", use_container_width=True):
+                result = install_startup_task("telegram")
+                st.session_state["LIVE_STARTUP_NOTICE"] = (
+                    "텔레그램 자동 시작을 설치했습니다."
+                    if result.get("ok")
+                    else f"텔레그램 자동 시작 설치 실패: {result.get('stderr') or result.get('stdout') or '원인 미상'}"
+                )
+            if install_cols[2].button("둘 다 설치", use_container_width=True):
+                worker_result = install_startup_task("worker")
+                telegram_result = install_startup_task("telegram")
+                ok = bool(worker_result.get("ok")) and bool(telegram_result.get("ok"))
+                st.session_state["LIVE_STARTUP_NOTICE"] = "워커와 텔레그램 자동 시작을 설치했습니다." if ok else "자동 시작 설치 중 일부가 실패했습니다."
+
+            remove_cols = st.columns(3)
+            if remove_cols[0].button("워커 자동시작 제거", use_container_width=True):
+                result = remove_startup_task("worker")
+                st.session_state["LIVE_STARTUP_NOTICE"] = (
+                    "워커 자동 시작을 제거했습니다." if result.get("ok") else f"워커 자동 시작 제거 실패: {result.get('stderr') or result.get('stdout') or '원인 미상'}"
+                )
+            if remove_cols[1].button("텔레그램 자동시작 제거", use_container_width=True):
+                result = remove_startup_task("telegram")
+                st.session_state["LIVE_STARTUP_NOTICE"] = (
+                    "텔레그램 자동 시작을 제거했습니다."
+                    if result.get("ok")
+                    else f"텔레그램 자동 시작 제거 실패: {result.get('stderr') or result.get('stdout') or '원인 미상'}"
+                )
+            if remove_cols[2].button("둘 다 제거", use_container_width=True):
+                worker_result = remove_startup_task("worker")
+                telegram_result = remove_startup_task("telegram")
+                ok = bool(worker_result.get("ok")) and bool(telegram_result.get("ok"))
+                st.session_state["LIVE_STARTUP_NOTICE"] = "워커와 텔레그램 자동 시작을 제거했습니다." if ok else "자동 시작 제거 중 일부가 실패했습니다."
+
+            if st.session_state.get("LIVE_STARTUP_NOTICE"):
+                st.info(str(st.session_state["LIVE_STARTUP_NOTICE"]))
 
     worker_cols = st.columns([1, 1, 1, 1.4])
     worker_interval = int(worker_cols[0].number_input("페이지 워커 주기(초)", 5, 3600, 30, 1, key="live_worker_interval"))
