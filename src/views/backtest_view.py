@@ -230,6 +230,51 @@ def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
     return strategy_name, params
 
 
+def _format_signal_time(index_value) -> str:
+    if index_value is None:
+        return "-"
+    try:
+        return pd.Timestamp(index_value).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "-"
+
+
+def _signal_timeline(frame: pd.DataFrame, *, limit: int = 12) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for timestamp, row in frame.iterrows():
+        if bool(row.get("buy_signal")):
+            rows.append({"시각": _format_signal_time(timestamp), "구분": "매수 신호", "가격": fmt_full_number(row.get("close"), 0)})
+        if bool(row.get("sell_signal")):
+            rows.append({"시각": _format_signal_time(timestamp), "구분": "매도 신호", "가격": fmt_full_number(row.get("close"), 0)})
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).tail(limit).iloc[::-1].reset_index(drop=True)
+
+
+def _research_condition_table(frame: pd.DataFrame, params: dict[str, float | int | str]) -> pd.DataFrame:
+    last = frame.iloc[-1]
+    adx_threshold = float(params.get("adx_threshold", 18.0))
+    volume_threshold = float(params.get("volume_threshold", 0.9))
+    checks = [
+        ("종가 > 빠른 EMA", bool(last.get("close", 0.0) > last.get("ema_fast", float("inf"))), last.get("close"), last.get("ema_fast")),
+        ("빠른 EMA > 느린 EMA", bool(last.get("ema_fast", 0.0) > last.get("ema_slow", float("inf"))), last.get("ema_fast"), last.get("ema_slow")),
+        ("ADX 기준 통과", bool(last.get("adx", 0.0) >= adx_threshold), last.get("adx"), adx_threshold),
+        ("돌파 기준선 상향", bool(last.get("close", 0.0) > last.get("breakout_high", float("inf"))), last.get("close"), last.get("breakout_high")),
+        ("거래량 비율 통과", bool(last.get("volume_ratio", 0.0) >= volume_threshold), last.get("volume_ratio"), volume_threshold),
+    ]
+    rows = []
+    for name, passed, current, threshold in checks:
+        rows.append(
+            {
+                "조건": name,
+                "통과": "예" if passed else "아니오",
+                "현재값": "-" if pd.isna(current) else (f"{float(current):.2f}" if isinstance(current, (float, int)) else str(current)),
+                "기준값": "-" if pd.isna(threshold) else (f"{float(threshold):.2f}" if isinstance(threshold, (float, int)) else str(threshold)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, object]):
     is_research = strategy_name == "research_trend"
     rows = 4 if is_research else 3
@@ -318,14 +363,19 @@ def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, 
         if column in frame:
             hits = frame[frame[column]]
             if not hits.empty:
+                marker_y = hits["close"]
+                if column == "buy_signal" and "low" in hits:
+                    marker_y = hits["low"] * 0.995
+                elif column == "sell_signal" and "high" in hits:
+                    marker_y = hits["high"] * 1.005
                 figure.add_trace(
                     go.Scatter(
                         x=hits.index,
-                        y=hits["close"],
+                        y=marker_y,
                         mode="markers",
                         name=label,
-                        marker={"symbol": symbol, "size": 13, "color": color, "line": {"color": "white", "width": 1.4}},
-                        hovertemplate="%{x}<br>가격=%{y:.0f}<extra></extra>",
+                        marker={"symbol": symbol, "size": 15, "color": color, "line": {"color": "white", "width": 1.4}},
+                        hovertemplate="%{x}<br>신호가=%{y:.0f}<extra></extra>",
                     ),
                     row=1,
                     col=1,
@@ -459,6 +509,23 @@ def render_backtest():
             "현재 신호",
             "매수" if bool(last_row.get("buy_signal")) else "매도" if bool(last_row.get("sell_signal")) else "대기",
         )
+        signal_cols = st.columns(4)
+        buy_hits = frame.index[frame["buy_signal"]].tolist()
+        sell_hits = frame.index[frame["sell_signal"]].tolist()
+        signal_cols[0].metric("매수 신호 수", len(buy_hits))
+        signal_cols[1].metric("매도 신호 수", len(sell_hits))
+        signal_cols[2].metric("최근 매수 신호", _format_signal_time(buy_hits[-1] if buy_hits else None))
+        signal_cols[3].metric("최근 매도 신호", _format_signal_time(sell_hits[-1] if sell_hits else None))
+
+        if strategy_name == "research_trend":
+            st.caption("최근 캔들 기준으로 어떤 매수 조건이 통과했고 막혔는지 바로 확인할 수 있습니다.")
+            st.dataframe(_research_condition_table(frame, strategy_params), use_container_width=True, hide_index=True)
+        elif not buy_hits:
+            st.info("현재 선택 구간에는 매수 신호가 없습니다. 기간을 넓히거나 다른 전략/파라미터를 비교해 보세요.")
+
+        timeline = _signal_timeline(frame)
+        if not timeline.empty:
+            st.dataframe(timeline, use_container_width=True, hide_index=True)
 
         st.caption("빈 삼각형은 전략 신호, 다이아몬드는 백테스트 체결입니다.")
         st.plotly_chart(_render_chart(frame, strategy_name, bt_result), use_container_width=True)

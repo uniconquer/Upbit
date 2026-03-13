@@ -61,6 +61,9 @@ def test_research_trend_frame_contains_expected_columns():
     assert expected.issubset(frame.columns)
     assert frame["buy_signal"].dtype == bool
     assert frame["sell_signal"].dtype == bool
+    assert frame.index.equals(_sample_ohlcv().index)
+    assert frame["ema_fast"].notna().sum() > 0
+    assert frame["ema_slow"].notna().sum() > 0
 
 
 def test_backtest_signal_frame_runs_on_research_trend():

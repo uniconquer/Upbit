@@ -25,16 +25,22 @@ def _validate_length(prices: Sequence[float], min_len: int) -> bool:
     return len(prices) >= min_len
 
 
+def _as_float_series(prices: Sequence[float] | pd.Series) -> pd.Series:
+    if isinstance(prices, pd.Series):
+        return prices.astype(float)
+    return pd.Series(prices, dtype=float)
+
+
 def sma(prices: Sequence[float], window: int) -> pd.Series:
     if window <= 0:
         raise ValueError("window > 0 required")
-    return pd.Series(prices, dtype=float).rolling(window).mean()
+    return _as_float_series(prices).rolling(window).mean()
 
 
 def ema(prices: Sequence[float], window: int) -> pd.Series:
     if window <= 0:
         raise ValueError("window > 0 required")
-    return pd.Series(prices, dtype=float).ewm(span=window, adjust=False).mean()
+    return _as_float_series(prices).ewm(span=window, adjust=False).mean()
 
 
 def _crossover_signals(
@@ -201,8 +207,8 @@ def build_research_trend_signals(
 
     df = raw.copy()
     close = df["close"].astype(float)
-    df["ema_fast"] = ema(close.tolist(), fast_ema)
-    df["ema_slow"] = ema(close.tolist(), slow_ema)
+    df["ema_fast"] = ema(close, fast_ema)
+    df["ema_slow"] = ema(close, slow_ema)
     df["atr"] = average_true_range(df, atr_window)
     df["adx"] = average_directional_index(df, adx_window)
     df["breakout_high"] = df["high"].rolling(breakout_window).max().shift(1)
