@@ -165,6 +165,7 @@ def _strategy_params_from_args(args) -> dict[str, Any]:
         "sensitivity": args.sensitivity,
         "atr_period": args.atr_period,
         "trend_ema_length": args.trend_ema_length,
+        "confirm_window": args.confirm_window,
         "use_heikin_ashi": args.use_heikin_ashi,
     }
 
@@ -840,6 +841,7 @@ def parse_args():
     parser.add_argument("--sensitivity", type=int, default=3)
     parser.add_argument("--atr-period", type=int, default=2)
     parser.add_argument("--trend-ema-length", type=int, default=240)
+    parser.add_argument("--confirm-window", type=int, default=8)
     parser.add_argument("--use-heikin-ashi", action="store_true", default=False)
     return parser.parse_args()
 

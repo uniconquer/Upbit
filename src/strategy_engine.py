@@ -23,7 +23,7 @@ STRATEGY_LABELS = {
 STRATEGY_DESCRIPTIONS = {
     "research_trend": "EMA 정배열, 거래량 동반 돌파, ADX 추세 강도, ATR 이탈 손절을 함께 보는 추세 전략입니다.",
     "flux_trend": "다중 시간대 볼린저 밴드와 칼만 기준선을 함께 보는 반전·재진입형 전략입니다.",
-    "flux_ema_filter": "플럭스 밴드 신호와 EMA·ATR 필터가 동시에 맞을 때만 진입하는 더 엄격한 추세-반전 혼합 전략입니다.",
+    "flux_ema_filter": "플럭스 신호 뒤에 EMA·ATR 확인이 일정 캔들 안에 따라올 때만 진입하는 확인형 추세-반전 혼합 전략입니다.",
 }
 
 
@@ -134,6 +134,7 @@ def build_strategy_frame(
             sensitivity=int(params.get("sensitivity", 3)),
             atr_period=int(params.get("atr_period", 2)),
             trend_ema_length=int(params.get("trend_ema_length", 240)),
+            confirm_window=int(params.get("confirm_window", 8)),
             use_heikin_ashi=_as_bool(params.get("use_heikin_ashi"), False),
         )
         return _finalize_indicator_frame(raw, indicator_frame, use_combo_signals=True)

@@ -87,6 +87,7 @@ LIVE_PARAM_WIDGETS = {
     "sensitivity": "live_sensitivity",
     "atr_period": "live_atr_period",
     "trend_ema_length": "live_trend_ema_length",
+    "confirm_window": "live_confirm_window",
     "use_heikin_ashi": "live_use_heikin_ashi",
     "worker_interval": "live_worker_interval",
 }
@@ -574,6 +575,7 @@ def _managed_worker_config_from_live_params(params: dict) -> dict:
         "sensitivity",
         "atr_period",
         "trend_ema_length",
+        "confirm_window",
         "use_heikin_ashi",
     ]:
         if field in params:
@@ -1340,7 +1342,8 @@ def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
             params["sensitivity"] = row2[0].number_input("민감도", 1, 10, 3, 1, key=f"{prefix}_sensitivity")
             params["atr_period"] = row2[1].number_input("ATR 기간", 1, 20, 2, 1, key=f"{prefix}_atr_period")
             params["trend_ema_length"] = row2[2].number_input("추세 EMA 길이", 20, 400, 240, 5, key=f"{prefix}_trend_ema_length")
-            params["use_heikin_ashi"] = row2[3].checkbox("Heikin Ashi 사용", value=False, key=f"{prefix}_use_heikin_ashi")
+            params["confirm_window"] = row2[3].number_input("EMA 확인 창", 0, 48, 8, 1, key=f"{prefix}_confirm_window")
+            params["use_heikin_ashi"] = st.checkbox("Heikin Ashi 사용", value=False, key=f"{prefix}_use_heikin_ashi")
     return strategy_name, params
 
 

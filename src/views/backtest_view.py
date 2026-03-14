@@ -90,6 +90,7 @@ _BACKTEST_DEFAULT_PARAMS: dict[str, dict[str, object]] = {
         "sensitivity": 3,
         "atr_period": 2,
         "trend_ema_length": 240,
+        "confirm_window": 8,
         "use_heikin_ashi": False,
     },
 }
@@ -124,6 +125,7 @@ _BACKTEST_WIDGET_KEYS: dict[str, dict[str, str]] = {
         "sensitivity": "bt_flux_ema_sensitivity",
         "atr_period": "bt_flux_ema_atr_period",
         "trend_ema_length": "bt_flux_ema_length",
+        "confirm_window": "bt_flux_ema_confirm_window",
         "use_heikin_ashi": "bt_flux_ema_heikin_ashi",
     },
 }
@@ -324,7 +326,8 @@ def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
             params["sensitivity"] = row2[0].number_input("민감도", 1, 10, 3, 1, key="bt_flux_ema_sensitivity")
             params["atr_period"] = row2[1].number_input("ATR 기간", 1, 20, 2, 1, key="bt_flux_ema_atr_period")
             params["trend_ema_length"] = row2[2].number_input("추세 EMA 길이", 20, 400, 240, 5, key="bt_flux_ema_length")
-            params["use_heikin_ashi"] = row2[3].checkbox("Heikin Ashi 사용", value=False, key="bt_flux_ema_heikin_ashi")
+            params["confirm_window"] = row2[3].number_input("EMA 확인 창", 0, 48, 8, 1, key="bt_flux_ema_confirm_window")
+            params["use_heikin_ashi"] = st.checkbox("Heikin Ashi 사용", value=False, key="bt_flux_ema_heikin_ashi")
     return strategy_name, params
 
 
@@ -405,7 +408,7 @@ def _strategy_param_summary(strategy_name: str, params: dict[str, object]) -> st
     return (
         f"LTF {int(params.get('ltf_len', 20))}/{float(params.get('ltf_mult', 2.0)):.2f} · "
         f"HTF {params.get('htf_rule', '60T')} · EMA {int(params.get('trend_ema_length', 240))} · "
-        f"민감도 {int(params.get('sensitivity', 3))}"
+        f"민감도 {int(params.get('sensitivity', 3))} · 확인창 {int(params.get('confirm_window', 8))}"
     )
 
 
@@ -607,6 +610,7 @@ def _present_sweep_results(results: pd.DataFrame, strategy_name: str) -> pd.Data
             "sensitivity",
             "atr_period",
             "trend_ema_length",
+            "confirm_window",
             "trades",
             "buy_signals",
             "sell_signals",
@@ -623,6 +627,7 @@ def _present_sweep_results(results: pd.DataFrame, strategy_name: str) -> pd.Data
             "sensitivity": "민감도",
             "atr_period": "ATR 기간",
             "trend_ema_length": "추세 EMA 길이",
+            "confirm_window": "EMA 확인 창",
             "trades": "거래 수",
             "buy_signals": "매수 신호 수",
             "sell_signals": "매도 신호 수",
@@ -1033,7 +1038,7 @@ def render_backtest():
             else:
                 sweep_cols1 = st.columns(3)
                 sweep_cols2 = st.columns(3)
-                sweep_cols3 = st.columns(2)
+                sweep_cols3 = st.columns(3)
                 grid = {
                     "ltf_len": _parse_sweep_values(
                         sweep_cols1[0].text_input("단기 길이 후보", "14, 20", key="bt_sweep_flux_ema_ltf_len"),
@@ -1064,6 +1069,10 @@ def render_backtest():
                     ),
                     "trend_ema_length": _parse_sweep_values(
                         sweep_cols3[1].text_input("추세 EMA 후보", "240", key="bt_sweep_flux_ema_length"),
+                        int,
+                    ),
+                    "confirm_window": _parse_sweep_values(
+                        sweep_cols3[2].text_input("EMA 확인 창 후보", "8", key="bt_sweep_flux_ema_confirm_window"),
                         int,
                     ),
                 }
@@ -1134,7 +1143,8 @@ def render_backtest():
                     else:
                         label = (
                             f"LTF {int(best['ltf_len'])}/{float(best['ltf_mult']):.2f} · "
-                            f"EMA {int(best['trend_ema_length'])} · 민감도 {int(best['sensitivity'])}"
+                            f"EMA {int(best['trend_ema_length'])} · 민감도 {int(best['sensitivity'])} · "
+                            f"확인창 {int(best.get('confirm_window', 8))}"
                         )
                     best_cols[3].metric("1위 조합", label)
                     if st.button("1위 설정을 현재 전략에 적용", key=f"bt_apply_best_{strategy_name}", use_container_width=True):

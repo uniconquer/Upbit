@@ -110,6 +110,7 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "sensitivity": _to_int(os.getenv("UPBIT_WORKER_SENSITIVITY"), 3),
         "atr_period": _to_int(os.getenv("UPBIT_WORKER_ATR_PERIOD"), 2),
         "trend_ema_length": _to_int(os.getenv("UPBIT_WORKER_TREND_EMA_LENGTH"), 240),
+        "confirm_window": _to_int(os.getenv("UPBIT_WORKER_CONFIRM_WINDOW"), 8),
         "use_heikin_ashi": _to_bool(os.getenv("UPBIT_WORKER_USE_HEIKIN_ASHI"), False),
     }
 
@@ -165,6 +166,7 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
     ]
     for field in integer_fields:
         config[field] = max(_to_int(config.get(field), defaults[field]), 1)
+    config["confirm_window"] = max(_to_int(config.get("confirm_window"), defaults["confirm_window"]), 0)
 
     float_fields = {
         "atr_mult": defaults["atr_mult"],
@@ -293,6 +295,8 @@ def build_worker_command(config: Mapping[str, Any]) -> list[str]:
                     str(cfg["atr_period"]),
                     "--trend-ema-length",
                     str(cfg["trend_ema_length"]),
+                    "--confirm-window",
+                    str(cfg["confirm_window"]),
                 ]
             )
             if cfg["use_heikin_ashi"]:

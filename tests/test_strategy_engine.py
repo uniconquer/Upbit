@@ -58,6 +58,7 @@ def _fake_flux_indicator_with_ema(
     sensitivity: int = 3,
     atr_period: int = 2,
     trend_ema_length: int = 240,
+    confirm_window: int = 8,
     use_heikin_ashi: bool = False,
 ) -> pd.DataFrame:
     frame = _fake_flux_indicator(
@@ -74,7 +75,7 @@ def _fake_flux_indicator_with_ema(
     frame["ema_sell"] = ema_sell
     frame["atr_stop"] = raw["close"] - sensitivity
     frame["trend_ema"] = raw["close"].rolling(2, min_periods=1).mean()
-    frame["strength"] = float(sensitivity) + float(atr_period) + (0.5 if use_heikin_ashi else 0.0)
+    frame["strength"] = float(sensitivity) + float(atr_period) + float(confirm_window) / 10.0 + (0.5 if use_heikin_ashi else 0.0)
     frame["combo_buy"] = frame["buy_signal"] & ema_buy
     frame["combo_sell"] = frame["sell_signal"] & ema_sell
     return frame
@@ -105,6 +106,7 @@ def test_build_strategy_frame_flux_ema_filter_uses_combo_signals():
             "sensitivity": 4,
             "atr_period": 3,
             "trend_ema_length": 180,
+            "confirm_window": 6,
             "use_heikin_ashi": True,
         },
         flux_indicator_with_ema=_fake_flux_indicator_with_ema,
@@ -148,12 +150,13 @@ def test_sweep_strategy_parameters_supports_flux_ema_filter():
             "sensitivity": [2, 3],
             "atr_period": [2],
             "trend_ema_length": [180],
+            "confirm_window": [8],
         },
         flux_indicator_with_ema=_fake_flux_indicator_with_ema,
     )
 
     assert len(results) == 4
-    assert {"sensitivity", "atr_period", "trend_ema_length", "total_return_pct"}.issubset(results.columns)
+    assert {"sensitivity", "atr_period", "trend_ema_length", "confirm_window", "total_return_pct"}.issubset(results.columns)
 
 
 def test_compare_strategy_backtests_ranks_multiple_strategies():
@@ -172,6 +175,7 @@ def test_compare_strategy_backtests_ranks_multiple_strategies():
                     "sensitivity": 3,
                     "atr_period": 2,
                     "trend_ema_length": 180,
+                    "confirm_window": 8,
                 },
             },
         ],

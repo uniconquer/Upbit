@@ -12,6 +12,7 @@ def test_coerce_worker_config_normalizes_values():
             "strategy": "flux_ema_filter",
             "htf_rule": "120T",
             "use_heikin_ashi": "yes",
+            "confirm_window": "10",
         }
     )
 
@@ -20,7 +21,14 @@ def test_coerce_worker_config_normalizes_values():
     assert config["live_orders"] is True
     assert config["strategy"] == "flux_ema_filter"
     assert config["htf_rule"] == "120T"
+    assert config["confirm_window"] == 10
     assert config["use_heikin_ashi"] is True
+
+
+def test_coerce_worker_config_allows_zero_confirm_window():
+    config = coerce_worker_config({"confirm_window": 0})
+
+    assert config["confirm_window"] == 0
 
 
 def test_build_worker_command_includes_live_and_strategy_args():
@@ -52,6 +60,7 @@ def test_build_worker_command_includes_flux_ema_filter_args():
             "sensitivity": 4,
             "atr_period": 3,
             "trend_ema_length": 180,
+            "confirm_window": 6,
             "use_heikin_ashi": True,
         }
     )
@@ -63,6 +72,8 @@ def test_build_worker_command_includes_flux_ema_filter_args():
     assert "3" in command
     assert "--trend-ema-length" in command
     assert "180" in command
+    assert "--confirm-window" in command
+    assert "6" in command
     assert "--use-heikin-ashi" in command
 
 

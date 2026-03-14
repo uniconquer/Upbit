@@ -301,6 +301,27 @@ def ema_signal(df: pd.DataFrame,
         'strength': strength
     }, index=d.index)
 
+
+def _confirm_follow_up(setup_signal: pd.Series, confirm_signal: pd.Series, window: int) -> pd.Series:
+    setup = setup_signal.fillna(False).astype(bool)
+    confirm = confirm_signal.fillna(False).astype(bool)
+    result = pd.Series(False, index=setup.index)
+    max_window = max(int(window), 0)
+    pending_index: int | None = None
+
+    for i in range(len(setup)):
+        if setup.iat[i]:
+            pending_index = i
+        if pending_index is None:
+            continue
+        if i - pending_index > max_window:
+            pending_index = None
+            continue
+        if confirm.iat[i]:
+            result.iat[i] = True
+            pending_index = None
+    return result
+
 def indicator_with_ema(
     df: pd.DataFrame,
     # Original MTF BB + Kalman params
@@ -313,6 +334,7 @@ def indicator_with_ema(
     sensitivity: int = 3,
     atr_period: int = 2,
     trend_ema_length: int = 240,
+    confirm_window: int = 8,
     use_heikin_ashi: bool = False,
     state: dict | None = None
 ) -> pd.DataFrame:
@@ -320,6 +342,7 @@ def indicator_with_ema(
 
     추가 컬럼:
     'ema_buy','ema_sell','atr_stop','trend_ema','strength','combo_buy','combo_sell'
+    combo 신호는 Flux setup 이후 confirm_window 캔들 안에 EMA 교차 확인이 들어오면 발생한다.
     """
     base = indicator(
         df,
@@ -335,7 +358,15 @@ def indicator_with_ema(
     join_cols = [c for c in ['atr_stop','ema_buy','ema_sell','trend_ema','strength'] if c in ema_df.columns]
     out = base.join(ema_df[join_cols], how='left')
 
-    # 단순 "두 조건 모두 충족" 콤보 시그널
-    out['combo_buy'] = out['buy_signal'].fillna(False) & out.get('ema_buy', pd.Series(False, index=out.index)).fillna(False)
-    out['combo_sell'] = out['sell_signal'].fillna(False) & out.get('ema_sell', pd.Series(False, index=out.index)).fillna(False)
+    # Flux setup 이후 일정 확인 창 안에서 EMA 교차가 들어오면 최종 신호로 본다.
+    out['combo_buy'] = _confirm_follow_up(
+        out['buy_signal'],
+        out.get('ema_buy', pd.Series(False, index=out.index)),
+        confirm_window,
+    )
+    out['combo_sell'] = _confirm_follow_up(
+        out['sell_signal'],
+        out.get('ema_sell', pd.Series(False, index=out.index)),
+        confirm_window,
+    )
     return out
