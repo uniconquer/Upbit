@@ -6,7 +6,7 @@ import pandas as pd
 
 from src.execution import resolve_submitted_order
 from src.kill_switch import save_kill_switch
-from src.mr_worker import MRMonitor, fetch_top_markets
+from src.mr_worker import MRMonitor, fetch_top_markets, normalize_market_codes
 from src.runtime_store import load_runtime_state
 
 
@@ -272,6 +272,18 @@ def test_fetch_top_markets_excludes_stables():
     api = FakeAPI()
     markets = fetch_top_markets(api, limit=3, exclude_stables=True)
     assert markets == ["KRW-BTC", "KRW-ETH"]
+
+
+def test_fetch_top_markets_excludes_requested_markets():
+    api = FakeAPI()
+    markets = fetch_top_markets(
+        api,
+        limit=3,
+        exclude_stables=False,
+        excluded_markets=normalize_market_codes("btc, KRW-ETH"),
+    )
+
+    assert markets == ["KRW-USDT"]
 
 
 def test_monitor_opens_and_closes_position():

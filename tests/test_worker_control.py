@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from src.worker_control import build_worker_command, coerce_worker_config, format_worker_status
+from src.runtime_store import save_runtime_state
+from src.worker_control import (
+    build_worker_command,
+    coerce_worker_config,
+    format_worker_status,
+    load_managed_worker_status,
+    save_worker_config,
+)
 
 
 def test_coerce_worker_config_normalizes_values():
@@ -49,6 +56,20 @@ def test_build_worker_command_includes_live_and_strategy_args():
     assert "8" in command
     assert "--fast-ema" in command
     assert "11" in command
+
+
+def test_build_worker_command_includes_excluded_markets():
+    command = build_worker_command(
+        {
+            "strategy": "research_trend",
+            "exclude_markets": "btc, KRW-ETH, xrp",
+        }
+    )
+
+    assert command.count("--exclude-market") == 3
+    assert "KRW-BTC" in command
+    assert "KRW-ETH" in command
+    assert "KRW-XRP" in command
 
 
 def test_build_worker_command_includes_relative_strength_args():
@@ -103,6 +124,26 @@ def test_build_worker_command_includes_flux_ema_filter_args():
     assert "--confirm-window" in command
     assert "6" in command
     assert "--use-heikin-ashi" in command
+
+
+def test_load_managed_worker_status_prefers_saved_config_when_stopped(tmp_path, monkeypatch):
+    monkeypatch.setenv("UPBIT_RUNTIME_DIR", str(tmp_path))
+    save_worker_config({"markets": 3, "max_trade_krw": 10000, "exclude_markets": "btc,eth,xrp"})
+    save_runtime_state(
+        "managed-worker-process",
+        {
+            "running": False,
+            "status": "stopped",
+            "pid": 1234,
+            "config": {"markets": 10, "max_trade_krw": 50000},
+        },
+    )
+
+    status = load_managed_worker_status()
+
+    assert status["config"]["markets"] == 3
+    assert status["config"]["max_trade_krw"] == 10000
+    assert status["config"]["exclude_markets"] == ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
 
 
 def test_format_worker_status_renders_korean_summary():

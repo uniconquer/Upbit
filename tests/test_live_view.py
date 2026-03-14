@@ -3,9 +3,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from src.views.live_view import _resolve_live_scan_action
+from src.views.live_view import _filter_ranked_markets, _normalize_market_codes, _resolve_live_scan_action
 
 
 def test_live_scan_action_prefers_manual_refresh():
@@ -54,3 +56,17 @@ def test_live_scan_action_does_nothing_while_worker_running():
     )
 
     assert action == "none"
+
+
+def test_normalize_market_codes_adds_krw_prefix_and_dedupes():
+    markets = _normalize_market_codes("btc, KRW-ETH, xrp, btc")
+
+    assert markets == ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
+
+
+def test_filter_ranked_markets_hides_excluded_symbols():
+    ranked = pd.DataFrame({"market": ["KRW-BTC", "KRW-XRP", "KRW-DOGE"]})
+
+    filtered = _filter_ranked_markets(ranked, ["KRW-BTC", "xrp"])
+
+    assert filtered["market"].tolist() == ["KRW-DOGE"]

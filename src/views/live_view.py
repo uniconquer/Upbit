@@ -65,6 +65,7 @@ LIVE_PARAM_WIDGETS = {
     "interval": "live_interval",
     "count": "live_count",
     "topn": "live_topn",
+    "exclude_markets_text": "live_exclude_markets",
     "fee": "live_fee",
     "slippage_bps": "live_slippage_bps",
     "strategy_name": "live_strategy_name",
@@ -166,6 +167,41 @@ def _position_text(value: str | None) -> str:
 
 def _interval_text(value: str) -> str:
     return _INTERVAL_LABELS.get(value, value)
+
+
+def _normalize_market_codes(value: object, *, base: str = "KRW") -> list[str]:
+    prefix = base.upper() + "-"
+    tokens: list[str] = []
+    if value is None:
+        return []
+    if isinstance(value, str):
+        tokens = value.split(",")
+    else:
+        for item in value:
+            if isinstance(item, str):
+                tokens.extend(item.split(","))
+            elif item is not None:
+                tokens.append(str(item))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        raw = str(token or "").strip().upper()
+        if not raw:
+            continue
+        market = raw if "-" in raw else f"{prefix}{raw}"
+        if market in seen:
+            continue
+        seen.add(market)
+        normalized.append(market)
+    return normalized
+
+
+def _filter_ranked_markets(ranked: pd.DataFrame, excluded_markets: object) -> pd.DataFrame:
+    excluded = {market.upper() for market in _normalize_market_codes(excluded_markets)}
+    if ranked.empty or not excluded or "market" not in ranked.columns:
+        return ranked
+    visible = ranked[~ranked["market"].astype(str).str.upper().isin(excluded)]
+    return visible.reset_index(drop=True)
 
 
 def _mode_text(value: str | None) -> str:
@@ -599,9 +635,11 @@ def _managed_worker_config_from_live_params(params: dict) -> dict:
     risk_limits = dict(params.get("risk_limits") or {})
     base = {
         "strategy": str(params.get("strategy_name") or "research_trend"),
+        "base": "KRW",
         "interval": str(params.get("interval") or "minute30"),
         "count": int(params.get("count") or 240),
         "markets": int(params.get("topn") or 20),
+        "exclude_markets": list(params.get("exclude_markets") or []),
         "loop_seconds": int(params.get("worker_interval") or 30),
         "max_open": 5,
         "min_fetch_seconds": 20.0,
@@ -888,7 +926,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
     pending_orders = dict(params.get("_pending_orders") or {})
     mode_label = "LIVE" if live_orders else "SIM"
     reconcile_timeout_seconds = float(params.get("reconcile_timeout_seconds") or 3.0)
-    ranked = _markets_rank()
+    ranked = _filter_ranked_markets(_markets_rank(), params.get("exclude_markets"))
 
     result_rows: list[dict[str, object]] = []
     detail_cache: dict[str, dict[str, object]] = {}
@@ -1645,6 +1683,15 @@ def render_live():
     fee = float(controls[3].number_input("수수료", 0.0, 0.01, 0.0005, 0.0001, format="%.4f", key="live_fee"))
     slippage_bps = float(controls[4].number_input("슬리피지 (bps)", 0.0, 100.0, 3.0, 0.5, key="live_slippage_bps"))
     auto = controls[5].checkbox("값 변경 시 자동 동기화", value=True, key="live_auto")
+    st.session_state.setdefault("live_exclude_markets", "KRW-BTC, KRW-ETH, KRW-XRP")
+    excluded_market_text = st.text_input(
+        "제외 종목",
+        key="live_exclude_markets",
+        help="콤마로 구분하세요. 예: KRW-BTC, KRW-ETH, XRP",
+    )
+    excluded_markets = _normalize_market_codes(excluded_market_text)
+    if excluded_markets:
+        st.caption(f"제외 중: {', '.join(excluded_markets)}")
     strategy_name, strategy_params = _strategy_controls("live")
 
     with st.expander("실거래 안전장치", expanded=False):
@@ -1720,6 +1767,8 @@ def render_live():
         "interval": interval,
         "count": count,
         "topn": topn,
+        "exclude_markets": excluded_markets,
+        "exclude_markets_text": ", ".join(excluded_markets),
         "fee": fee,
         "slippage_bps": slippage_bps,
         "strategy_name": strategy_name,
@@ -1772,6 +1821,9 @@ def render_live():
 
         if st.session_state.get("LIVE_BG_NOTICE"):
             st.info(str(st.session_state["LIVE_BG_NOTICE"]))
+        managed_excluded = list(managed_status.get("config", {}).get("exclude_markets") or [])
+        if managed_excluded:
+            st.caption(f"제외 종목: {', '.join(managed_excluded)}")
         st.code(format_worker_status(managed_status), language="text")
 
         log_tail = read_worker_log_tail(20)

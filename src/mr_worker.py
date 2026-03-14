@@ -100,12 +100,40 @@ load_dotenv()
 KST = timezone(timedelta(hours=9))
 
 
+def normalize_market_codes(values: Any, *, base: str = "KRW") -> list[str]:
+    prefix = base.upper() + "-"
+    tokens: list[str] = []
+    if values is None:
+        return []
+    if isinstance(values, str):
+        tokens = values.split(",")
+    else:
+        for value in values:
+            if isinstance(value, str):
+                tokens.extend(value.split(","))
+            elif value is not None:
+                tokens.append(str(value))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        raw = str(token or "").strip().upper()
+        if not raw:
+            continue
+        market = raw if "-" in raw else f"{prefix}{raw}"
+        if market in seen:
+            continue
+        seen.add(market)
+        normalized.append(market)
+    return normalized
+
+
 def fetch_top_markets(
     api: UpbitAPI,
     *,
     base: str = "KRW",
     limit: int = 40,
     exclude_stables: bool = True,
+    excluded_markets: list[str] | None = None,
 ) -> list[str]:
     markets = api.markets()
     prefix = base.upper() + "-"
@@ -113,11 +141,14 @@ def fetch_top_markets(
     market_codes = [item["market"] for item in filtered]
     tickers = api.tickers(market_codes)
     ordered = sorted(tickers, key=lambda item: float(item.get("acc_trade_price_24h") or 0.0), reverse=True)
-    result = [item["market"] for item in ordered[:limit]]
+    result = [item["market"] for item in ordered if isinstance(item.get("market"), str)]
     if exclude_stables:
         stable_keywords = ("USDT", "USDC", "USDJ", "DAI", "UST")
         result = [market for market in result if not any(keyword in market for keyword in stable_keywords)]
-    return result
+    excluded_set = {market.upper() for market in normalize_market_codes(excluded_markets, base=base)}
+    if excluded_set:
+        result = [market for market in result if market.upper() not in excluded_set]
+    return result[:limit]
 
 
 def _frame_from_candles(candles) -> pd.DataFrame:
@@ -990,6 +1021,8 @@ def parse_args():
     parser.add_argument("--slippage-bps", type=float, default=3.0)
     parser.add_argument("--kill-switch-name", default="trade-kill-switch")
     parser.add_argument("--no-exclude-stables", action="store_true", help="Keep stablecoin pairs in the universe")
+    parser.add_argument("--exclude-market", action="append", default=[], help="Exclude this market from the worker universe")
+    parser.add_argument("--exclude-markets", default="", help="Comma-separated markets or tickers to exclude")
     parser.add_argument("--fee", type=float, default=0.0005)
 
     parser.add_argument("--max-trade-krw", type=float, default=50000.0)
@@ -1043,11 +1076,13 @@ def main():
         access_key=os.getenv("UPBIT_ACCESS_KEY"),
         secret_key=os.getenv("UPBIT_SECRET_KEY"),
     )
+    excluded_markets = normalize_market_codes([*list(args.exclude_market), args.exclude_markets], base=args.base)
     markets = fetch_top_markets(
         api,
         base=args.base,
         limit=args.markets,
         exclude_stables=not args.no_exclude_stables,
+        excluded_markets=excluded_markets,
     )
     monitor = MRMonitor(
         api,

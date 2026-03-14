@@ -49,6 +49,33 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _normalize_market_codes(value: Any, *, base: str = "KRW") -> list[str]:
+    prefix = base.upper() + "-"
+    tokens: list[str] = []
+    if value is None:
+        return []
+    if isinstance(value, str):
+        tokens = value.split(",")
+    else:
+        for item in value:
+            if isinstance(item, str):
+                tokens.extend(item.split(","))
+            elif item is not None:
+                tokens.append(str(item))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        raw = str(token or "").strip().upper()
+        if not raw:
+            continue
+        market = raw if "-" in raw else f"{prefix}{raw}"
+        if market in seen:
+            continue
+        seen.add(market)
+        normalized.append(market)
+    return normalized
+
+
 def _format_kst_timestamp(value: Any) -> str:
     try:
         ts = float(value or 0.0)
@@ -71,9 +98,11 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
     raw = dict(raw or {})
     defaults = {
         "strategy": os.getenv("UPBIT_WORKER_STRATEGY", "research_trend"),
+        "base": os.getenv("UPBIT_WORKER_BASE", "KRW"),
         "interval": os.getenv("UPBIT_WORKER_INTERVAL", "minute30"),
         "count": _to_int(os.getenv("UPBIT_WORKER_COUNT"), 240),
         "markets": _to_int(os.getenv("UPBIT_WORKER_MARKETS"), 10),
+        "exclude_markets": os.getenv("UPBIT_WORKER_EXCLUDE_MARKETS", ""),
         "loop_seconds": _to_int(os.getenv("UPBIT_WORKER_LOOP_SECONDS"), 30),
         "max_open": _to_int(os.getenv("UPBIT_WORKER_MAX_OPEN"), 5),
         "min_fetch_seconds": _to_float(os.getenv("UPBIT_WORKER_MIN_FETCH_SECONDS"), 20.0),
@@ -122,9 +151,11 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
 
     config = {**defaults, **raw}
     config["strategy"] = str(config.get("strategy") or defaults["strategy"])
+    config["base"] = str(config.get("base") or defaults["base"]).upper()
     config["interval"] = str(config.get("interval") or defaults["interval"])
     config["count"] = max(_to_int(config.get("count"), defaults["count"]), 50)
     config["markets"] = max(_to_int(config.get("markets"), defaults["markets"]), 1)
+    config["exclude_markets"] = _normalize_market_codes(config.get("exclude_markets"), base=config["base"])
     config["loop_seconds"] = max(_to_int(config.get("loop_seconds"), defaults["loop_seconds"]), 5)
     config["max_open"] = max(_to_int(config.get("max_open"), defaults["max_open"]), 1)
     config["min_fetch_seconds"] = max(_to_float(config.get("min_fetch_seconds"), defaults["min_fetch_seconds"]), 0.0)
@@ -219,6 +250,8 @@ def build_worker_command(config: Mapping[str, Any]) -> list[str]:
         str(cfg["strategy"]),
         "--interval",
         str(cfg["interval"]),
+        "--base",
+        str(cfg["base"]),
         "--count",
         str(cfg["count"]),
         "--markets",
@@ -254,6 +287,8 @@ def build_worker_command(config: Mapping[str, Any]) -> list[str]:
         "--daily-loss-limit-pct",
         str(cfg["daily_loss_limit_pct"]),
     ]
+    for market in cfg["exclude_markets"]:
+        command.extend(["--exclude-market", str(market)])
     if cfg["include_unrealized_loss"]:
         command.append("--include-unrealized-loss")
     if cfg["strategy"] == "research_trend":
@@ -483,7 +518,8 @@ def read_worker_log_tail(max_lines: int = 40) -> str:
 
 def load_managed_worker_status() -> dict[str, Any]:
     process_state = _refresh_process_state()
-    config = load_worker_config(process_state.get("config") if isinstance(process_state.get("config"), dict) else None)
+    process_config = process_state.get("config") if bool(process_state.get("running")) and isinstance(process_state.get("config"), dict) else None
+    config = load_worker_config(process_config)
     runtime = load_runtime_state(str(config["state_name"]), default={})
     runtime = dict(runtime) if isinstance(runtime, dict) else {}
     metrics = dict(runtime.get("metrics") or {})
