@@ -156,6 +156,7 @@ def sync_exchange_state(
     existing_pending_orders: Mapping[str, Mapping[str, Any]] | None = None,
     existing_signal_state: Mapping[str, Mapping[str, Any]] | None = None,
     quote_currency: str = "KRW",
+    announce_success: bool = True,
 ) -> dict[str, Any]:
     positions = dict(existing_positions or {})
     pending_orders = dict(existing_pending_orders or {})
@@ -184,13 +185,12 @@ def sync_exchange_state(
             existing_positions=positions,
             quote_currency=quote_currency,
         )
-        if mapped_pending_orders or not pending_orders:
-            pending_orders = mapped_pending_orders
+        pending_orders = mapped_pending_orders
         orders_ok = True
     except Exception as exc:
         notifications.append(f"[\uc2e4\uac70\ub798] \ubbf8\uccb4\uacb0 \uc8fc\ubb38 \ub3d9\uae30\ud654\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4: {exc}")
 
-    if accounts_ok and orders_ok:
+    if accounts_ok and orders_ok and announce_success:
         notifications.append(
             f"[\uc2e4\uac70\ub798] \uac70\ub798\uc18c \uc0c1\ud0dc \ub3d9\uae30\ud654 \uc644\ub8cc: \ubcf4\uc720 \ud3ec\uc9c0\uc158 {len(positions)}\uac1c, \ubbf8\uccb4\uacb0 \uc8fc\ubb38 {len(pending_orders)}\uac74"
         )

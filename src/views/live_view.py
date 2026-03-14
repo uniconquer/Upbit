@@ -11,7 +11,7 @@ from plotly.subplots import make_subplots
 
 from daily_summary import current_kst_day, rollover_daily_report
 from exchange_state import sync_exchange_state
-from execution import build_pending_order, pending_fill_delta, resolve_submitted_order
+from execution import build_client_order_identifier, build_pending_order, pending_fill_delta, resolve_submitted_order
 from kill_switch import effective_kill_switch, load_kill_switch, save_kill_switch
 from notifier import get_notifier
 from notification_text import (
@@ -584,6 +584,7 @@ def _sync_live_exchange_state(params: dict, last_state: dict) -> dict:
         existing_positions=params.get("_positions"),
         existing_pending_orders=params.get("_pending_orders"),
         existing_signal_state=last_state,
+        announce_success=not bool(params.get("_exchange_synced")),
     )
 
 
@@ -757,13 +758,14 @@ def _reconcile_pending_orders(
 ) -> None:
     if not api or not pending_orders:
         return
+    unknown_order_ttl_seconds = 45.0
     for market, pending in list(pending_orders.items()):
-        if not pending.get("uuid"):
+        if not pending.get("uuid") and not pending.get("identifier"):
             pending_orders.pop(market, None)
             continue
         resolution = resolve_submitted_order(
             api,
-            {"uuid": pending["uuid"]},
+            {"uuid": pending.get("uuid"), "identifier": pending.get("identifier")},
             live_orders=True,
             side=str(pending.get("side") or "").lower(),
             fallback_price=float(pending.get("fallback_price") or 0.0),
@@ -816,6 +818,14 @@ def _reconcile_pending_orders(
                 if message:
                     notify.append(message)
         if status == "pending":
+            unresolved_identifier = bool(updated_pending.get("identifier")) and not updated_pending.get("uuid")
+            age_seconds = time.time() - float(updated_pending.get("submitted_at") or 0.0)
+            if unresolved_identifier and age_seconds >= unknown_order_ttl_seconds:
+                pending_orders.pop(market, None)
+                notify.append(lookup_failed_message("LIVE", market=market, side=side, error="identifier lookup timeout"))
+                if side == "bid":
+                    last_state[market] = {"sig": "WAIT", "entry": None}
+                continue
             pending_orders[market] = updated_pending
             continue
         pending_orders.pop(market, None)
@@ -852,14 +862,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
     saved_last_report_day = str(params.get("_last_daily_report_day") or "").strip()
     last_daily_report_day = saved_last_report_day or None
     sync_notifications: list[str] = []
-    if live_orders and (not exchange_synced) and time.time() >= exchange_sync_due_at:
-        sync_result = _sync_live_exchange_state(params, last_state)
-        params["_positions"] = dict(sync_result.get("positions") or {})
-        params["_pending_orders"] = dict(sync_result.get("pending_orders") or {})
-        last_state = dict(sync_result.get("last_signal_state") or last_state)
-        exchange_synced = bool(sync_result.get("synced"))
-        exchange_sync_due_at = 0.0 if exchange_synced else (time.time() + 60.0)
-        sync_notifications = list(sync_result.get("notifications") or [])
+    exchange_sync_interval_seconds = float(params.get("exchange_sync_interval_seconds") or 180.0)
     trader = PaperTrader(params.get("_positions"))
     rollover = rollover_daily_report(
         current_day=current_day,
@@ -878,25 +881,6 @@ def _scan_core(params: dict, last_state: dict) -> dict:
     report_message = rollover.get("message")
     if isinstance(report_message, str) and report_message.strip():
         notify.append(report_message)
-    notify.extend(sync_notifications)
-    ranked = _markets_rank()
-    if ranked.empty:
-        return {
-            "table": pd.DataFrame(),
-            "detail": {},
-            "last_sig": last_state,
-            "notify": notify,
-            "trades": [],
-            "_metrics": ensure_daily_metrics(params.get("_metrics"), day=current_day),
-            "_positions": dict(params.get("_positions") or {}),
-            "_pending_orders": dict(params.get("_pending_orders") or {}),
-            "_daily_reports": daily_reports,
-            "_last_daily_report_day": last_daily_report_day,
-            "_exchange_synced": exchange_synced,
-            "_exchange_sync_due_at": exchange_sync_due_at,
-            "last_run": time.time(),
-        }
-
     metrics = ensure_daily_metrics(params.get("_metrics"), day=current_day)
     metrics["day_start_equity"] = _resolve_day_start_equity(metrics, trader)
     risk_config = risk_config_from_dict(params.get("risk_limits"))
@@ -904,6 +888,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
     pending_orders = dict(params.get("_pending_orders") or {})
     mode_label = "LIVE" if live_orders else "SIM"
     reconcile_timeout_seconds = float(params.get("reconcile_timeout_seconds") or 3.0)
+    ranked = _markets_rank()
 
     result_rows: list[dict[str, object]] = []
     detail_cache: dict[str, dict[str, object]] = {}
@@ -920,6 +905,34 @@ def _scan_core(params: dict, last_state: dict) -> dict:
         timeout_seconds=reconcile_timeout_seconds,
         cost_model=cost_model,
     )
+    if live_orders and time.time() >= exchange_sync_due_at:
+        sync_params = dict(params)
+        sync_params["_positions"] = trader.to_state()
+        sync_params["_pending_orders"] = pending_orders
+        sync_result = _sync_live_exchange_state(sync_params, last_state)
+        trader = PaperTrader(sync_result.get("positions"))
+        pending_orders = dict(sync_result.get("pending_orders") or {})
+        last_state = dict(sync_result.get("last_signal_state") or last_state)
+        exchange_synced = bool(sync_result.get("synced"))
+        exchange_sync_due_at = time.time() + (exchange_sync_interval_seconds if exchange_synced else 60.0)
+        sync_notifications = list(sync_result.get("notifications") or [])
+    notify.extend(sync_notifications)
+    if ranked.empty:
+        return {
+            "table": pd.DataFrame(),
+            "detail": {},
+            "last_sig": last_state,
+            "notify": notify,
+            "trades": trade_events,
+            "_metrics": metrics,
+            "_positions": trader.to_state(),
+            "_pending_orders": pending_orders,
+            "_daily_reports": daily_reports,
+            "_last_daily_report_day": last_daily_report_day,
+            "_exchange_synced": exchange_synced,
+            "_exchange_sync_due_at": exchange_sync_due_at,
+            "last_run": time.time(),
+        }
 
     for _, row in ranked.head(int(params["topn"])).iterrows():
         market = row["market"]
@@ -995,7 +1008,14 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                     continue
                 order_result = {"simulate": True}
                 if live_orders:
-                    order_result = api.create_order(market, side="bid", ord_type="price", price=f"{int(decision.trade_cost)}", simulate=False)
+                    order_result = api.create_order(
+                        market,
+                        side="bid",
+                        ord_type="price",
+                        price=f"{int(decision.trade_cost)}",
+                        simulate=False,
+                        identifier=build_client_order_identifier(market, "bid", strategy_name=strategy_name),
+                    )
                 resolution = resolve_submitted_order(
                     api,
                     order_result,
@@ -1074,6 +1094,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                     ord_type="market",
                     volume=f"{position.qty:.8f}",
                     simulate=False,
+                    identifier=build_client_order_identifier(market, "ask", strategy_name=strategy_name),
                 )
             resolution = resolve_submitted_order(
                 api,
@@ -1705,6 +1726,7 @@ def render_live():
         "risk_limits": risk_limits,
         "live_trading": live_trading,
         "reconcile_timeout_seconds": 3.0,
+        "exchange_sync_interval_seconds": 180.0,
         "kill_switch_name": LIVE_KILL_SWITCH_NAME,
         **strategy_params,
     }

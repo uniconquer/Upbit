@@ -50,6 +50,14 @@ class PendingLiveAPI(FakeAPI):
     def create_order(self, *args, **kwargs):
         return {"uuid": "order-1"}
 
+    def accounts(self):
+        if self.order_reads >= 2:
+            return [
+                {"currency": "KRW", "balance": "990000", "locked": "0"},
+                {"currency": "BTC", "balance": "100", "locked": "0", "avg_buy_price": "100"},
+            ]
+        return []
+
     def get_order(self, uuid=None, identifier=None):
         self.order_reads += 1
         if self.order_reads == 1:
@@ -180,6 +188,67 @@ class ExchangeSyncAPI(FakeAPI):
                 "locked": "0.01000000",
             }
         ]
+
+
+class PeriodicExchangeSyncAPI(FakeAPI):
+    def __init__(self):
+        self.accounts_calls = 0
+
+    def accounts(self):
+        self.accounts_calls += 1
+        if self.accounts_calls <= 2:
+            return [
+                {"currency": "KRW", "balance": "500000", "locked": "0"},
+                {"currency": "BTC", "balance": "0.05000000", "locked": "0", "avg_buy_price": "100.0"},
+            ]
+        return [
+            {"currency": "KRW", "balance": "500000", "locked": "0"},
+            {"currency": "ETH", "balance": "1.50000000", "locked": "0", "avg_buy_price": "200.0"},
+        ]
+
+
+class MyOrderEventAPI(FakeAPI):
+    def __init__(self):
+        self.order_reads = 0
+        self.callback = None
+        self.last_identifier = None
+        self.filled = False
+
+    def create_order(self, *args, **kwargs):
+        self.last_identifier = kwargs.get("identifier")
+        return {"uuid": "ws-order-1", "identifier": self.last_identifier, "side": "bid"}
+
+    def get_order(self, uuid=None, identifier=None):
+        self.order_reads += 1
+        return {
+            "uuid": uuid or "ws-order-1",
+            "identifier": identifier or self.last_identifier,
+            "side": "bid",
+            "state": "wait",
+            "remaining_volume": "100",
+            "executed_volume": "0",
+            "executed_funds": "0",
+        }
+
+    def accounts(self):
+        if self.filled:
+            return [
+                {"currency": "KRW", "balance": "990000", "locked": "0"},
+                {"currency": "BTC", "balance": "100", "locked": "0", "avg_buy_price": "100"},
+            ]
+        return []
+
+    def stream_my_order(self, on_message, *, markets=None, run_seconds=0, stop_event=None):
+        self.callback = on_message
+
+        class _DummyThread:
+            def is_alive(self):
+                return True
+
+            def join(self, timeout=None):
+                return None
+
+        return _DummyThread()
 
 
 def _signal_frame(*, buy: bool = False, sell: bool = False, close: float = 100.0) -> pd.DataFrame:
@@ -410,6 +479,78 @@ def test_live_monitor_syncs_positions_and_open_orders(monkeypatch):
     assert "KRW-BTC" in monitor.pending_orders
     assert monitor.trader.has_position("KRW-BTC")
     assert monitor.last_signal_state["KRW-BTC"]["sig"] == "SELL_PENDING"
+
+
+def test_live_monitor_can_sync_again_after_initial_success(monkeypatch):
+    monkeypatch.setenv("UPBIT_LIVE", "1")
+    api = PeriodicExchangeSyncAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        risk_limits={"max_trade_krw": 10000},
+        max_open=2,
+        min_fetch_seconds=0,
+        per_request_sleep=0,
+        live_orders=True,
+    )
+
+    monitor.run_cycle([])
+    assert monitor.trader.has_position("KRW-BTC")
+
+    monitor._next_exchange_sync_at = 0.0
+    monitor.run_cycle([])
+
+    assert api.accounts_calls >= 3
+    assert not monitor.trader.has_position("KRW-BTC")
+    assert monitor.trader.has_position("KRW-ETH")
+
+
+def test_live_monitor_applies_my_order_event_before_polling(monkeypatch):
+    monkeypatch.setenv("UPBIT_LIVE", "1")
+    api = MyOrderEventAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        risk_limits={"max_trade_krw": 10000},
+        max_open=2,
+        min_fetch_seconds=0,
+        per_request_sleep=0,
+        live_orders=True,
+        reconcile_timeout_seconds=0.01,
+    )
+
+    frames = [_signal_frame(buy=True, close=100.0)]
+
+    def fake_build_frame(self, market):
+        return frames.pop(0)
+
+    monitor._build_frame = MethodType(fake_build_frame, monitor)
+    monitor.run_cycle(["KRW-BTC"])
+    assert "KRW-BTC" in monitor.pending_orders
+    assert api.callback is not None
+
+    pending = dict(monitor.pending_orders["KRW-BTC"])
+    api.filled = True
+    api.callback(
+        {
+            "uuid": "ws-order-1",
+            "identifier": pending.get("identifier"),
+            "code": "KRW-BTC",
+            "ask_bid": "BID",
+            "state": "done",
+            "remaining_volume": "0",
+            "executed_volume": "100",
+            "executed_funds": "10000",
+            "paid_fee": "0",
+            "avg_price": "100",
+        }
+    )
+
+    monitor.run_cycle([])
+
+    assert not monitor.pending_orders
+    assert monitor.trader.has_position("KRW-BTC")
+    assert len(monitor.trade_log) == 1
 
 
 def test_kill_switch_blocks_new_entry_but_allows_exit(tmp_path, monkeypatch):

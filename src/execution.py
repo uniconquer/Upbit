@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any, Mapping
 
 
-TERMINAL_STATES = {"done", "cancel"}
+TERMINAL_STATES = {"done", "cancel", "prevented"}
 
 
 def _to_float(value: Any) -> float:
@@ -14,6 +15,40 @@ def _to_float(value: Any) -> float:
         return float(value)
     except Exception:
         return 0.0
+
+
+def build_client_order_identifier(market: str, side: str, *, strategy_name: str = "strategy") -> str:
+    market_token = "".join(ch for ch in str(market or "").upper() if ch.isalnum())[:16] or "MARKET"
+    side_token = str(side or "").lower()[:4] or "side"
+    strategy_token = "".join(ch for ch in str(strategy_name or "").lower() if ch.isalnum())[:12] or "strategy"
+    return f"codex-{strategy_token}-{market_token}-{side_token}-{uuid.uuid4().hex[:12]}"
+
+
+def normalize_ws_order_event(event: Mapping[str, Any] | None) -> dict[str, Any]:
+    raw = dict(event or {})
+    side = str(raw.get("side") or raw.get("ask_bid") or "").lower()
+    if side == "ask":
+        side = "ask"
+    elif side == "bid":
+        side = "bid"
+    state = str(raw.get("state") or "").lower()
+    if state == "trade":
+        state = "wait"
+    return {
+        "uuid": raw.get("uuid"),
+        "identifier": raw.get("identifier"),
+        "market": raw.get("market") or raw.get("code"),
+        "side": side,
+        "state": state,
+        "remaining_volume": raw.get("remaining_volume"),
+        "executed_volume": raw.get("executed_volume"),
+        "executed_funds": raw.get("executed_funds") or raw.get("trade_price"),
+        "paid_fee": raw.get("paid_fee"),
+        "avg_price": raw.get("avg_price") or raw.get("trade_price"),
+        "price": raw.get("price"),
+        "volume": raw.get("volume"),
+        "raw_event": raw,
+    }
 
 
 def wait_for_order_completion(
@@ -115,30 +150,33 @@ def resolve_submitted_order(
     poll_interval: float = 0.4,
 ) -> dict[str, Any]:
     raw_result = dict(order_result or {})
-    if raw_result.get("error"):
-        return {
-            "status": "error",
-            "error": raw_result.get("error"),
-            "status_code": raw_result.get("status_code"),
-            "fill": extract_fill_metrics(
-                None,
-                side=side,
-                fallback_price=fallback_price,
-                fallback_cost=fallback_cost,
-                fallback_qty=fallback_qty,
-            ),
-            "order": raw_result,
-        }
-
     resolved_order = raw_result
     order_uuid = raw_result.get("uuid")
+    order_identifier = raw_result.get("identifier")
     resolved_side = str(raw_result.get("side") or side or "").lower()
-    if live_orders and order_uuid:
+
+    if live_orders and raw_result.get("error") and order_identifier:
+        try:
+            looked_up = wait_for_order_completion(
+                api,
+                identifier=str(order_identifier),
+                timeout_seconds=timeout_seconds,
+                poll_interval=poll_interval,
+            )
+            if looked_up:
+                resolved_order = looked_up
+                order_uuid = looked_up.get("uuid")
+        except Exception as exc:
+            resolved_order = dict(raw_result)
+            resolved_order["lookup_error"] = repr(exc)
+
+    if live_orders and (order_uuid or order_identifier):
         try:
             resolved_order = (
                 wait_for_order_completion(
                     api,
-                    uuid=str(order_uuid),
+                    uuid=str(order_uuid) if order_uuid else None,
+                    identifier=str(order_identifier) if order_identifier else None,
                     timeout_seconds=timeout_seconds,
                     poll_interval=poll_interval,
                 )
@@ -155,15 +193,28 @@ def resolve_submitted_order(
         fallback_cost=fallback_cost,
         fallback_qty=fallback_qty,
     )
+    fill["identifier"] = resolved_order.get("identifier") or order_identifier
     order_state = str(fill.get("order_state") or "")
     actual_executed_qty = _to_float(resolved_order.get("executed_volume"))
     actual_remaining = _to_float(resolved_order.get("remaining_volume"))
+
+    if raw_result.get("error") and not (resolved_order.get("uuid") or resolved_order.get("identifier")):
+        return {
+            "status": "error",
+            "error": raw_result.get("error"),
+            "status_code": raw_result.get("status_code"),
+            "fill": fill,
+            "order": raw_result,
+        }
+
     if not live_orders:
         status = "filled"
-    elif order_state == "cancel":
+    elif order_state in {"cancel", "prevented"}:
         status = "cancelled"
     elif order_state == "done" or (actual_executed_qty > 0 and actual_remaining <= 0):
         status = "filled"
+    elif raw_result.get("error") and raw_result.get("ambiguous_submission"):
+        status = "pending"
     else:
         status = "pending"
 
@@ -196,6 +247,7 @@ def build_pending_order(
         "strategy": strategy,
         "reason": reason,
         "uuid": raw_result.get("uuid"),
+        "identifier": raw_result.get("identifier") or fill.get("identifier"),
         "fallback_price": float(fill.get("market_price") or fallback_price),
         "requested_cost": float(requested_cost) if requested_cost is not None else None,
         "requested_qty": float(requested_qty) if requested_qty is not None else None,

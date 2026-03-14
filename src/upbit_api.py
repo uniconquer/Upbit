@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 from pydantic import BaseModel
 import json
 import threading
-from websocket import create_connection, WebSocket
+from websocket import WebSocketTimeoutException, create_connection, WebSocket
 import jwt
 
 UPBIT_API_BASE = "https://api.upbit.com/v1"
@@ -90,33 +90,115 @@ class UpbitAPI:
             ))
         return out
 
-    # ---------- WebSocket (simple ticker stream) ----------
-    def stream_ticker(self, markets: list[str], on_message, run_seconds: int = 30):
-        """Subscribe to ticker websocket; calls on_message(dict) per event. Stops after run_seconds."""
-        url = "wss://api.upbit.com/websocket/v1"
+    def _decode_ws_message(self, data: Any) -> Dict[str, Any] | list[Any] | None:
+        if isinstance(data, (bytes, bytearray)):
+            try:
+                data = data.decode("utf-8")
+            except Exception:
+                return None
+        if isinstance(data, str):
+            try:
+                return json.loads(data)
+            except Exception:
+                return None
+        if isinstance(data, (dict, list)):
+            return data
+        return None
+
+    def _stream_ws(
+        self,
+        *,
+        url: str,
+        payload: list[dict[str, Any]],
+        on_message,
+        run_seconds: int = 0,
+        headers: list[str] | None = None,
+        stop_event: threading.Event | None = None,
+    ):
+        def _run():
+            ws: WebSocket | None = None
+            try:
+                ws = create_connection(url, timeout=5, header=headers or [])
+                ws.settimeout(1.0)
+                ws.send(json.dumps(payload))
+                started_at = time.time()
+                while not (stop_event and stop_event.is_set()):
+                    if run_seconds > 0 and (time.time() - started_at) >= run_seconds:
+                        break
+                    try:
+                        data = ws.recv()
+                    except WebSocketTimeoutException:
+                        continue
+                    obj = self._decode_ws_message(data)
+                    if obj is None:
+                        continue
+                    try:
+                        on_message(obj)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            finally:
+                try:
+                    if ws is not None:
+                        ws.close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        return thread
+
+    # ---------- WebSocket ----------
+    def stream_ticker(
+        self,
+        markets: list[str],
+        on_message,
+        run_seconds: int = 30,
+        *,
+        stop_event: threading.Event | None = None,
+    ):
+        """Subscribe to ticker websocket; calls on_message(dict) per event."""
         payload = [
             {"ticket": uuid.uuid4().hex},
             {"type": "ticker", "codes": markets},
         ]
-        def _run():
-            try:
-                ws: WebSocket = create_connection(url, timeout=5)
-                ws.send(json.dumps(payload))
-                import time as _time
-                end = _time.time() + run_seconds
-                while _time.time() < end:
-                    data = ws.recv()
-                    try:
-                        obj = json.loads(data)
-                        on_message(obj)
-                    except Exception:
-                        pass
-                ws.close()
-            except Exception:
-                pass
-        th = threading.Thread(target=_run, daemon=True)
-        th.start()
-        return th
+        return self._stream_ws(
+            url="wss://api.upbit.com/websocket/v1",
+            payload=payload,
+            on_message=on_message,
+            run_seconds=run_seconds,
+            stop_event=stop_event,
+        )
+
+    def stream_my_order(
+        self,
+        on_message,
+        *,
+        markets: list[str] | None = None,
+        run_seconds: int = 0,
+        stop_event: threading.Event | None = None,
+    ):
+        """Subscribe to private myOrder websocket events."""
+        if not self.access_key or not self.secret_key:
+            raise RuntimeError("API keys required for private websocket stream")
+        request: dict[str, Any] = {"type": "myOrder"}
+        codes = [str(market).upper() for market in (markets or []) if str(market).strip()]
+        if codes:
+            request["codes"] = codes
+        payload = [
+            {"ticket": uuid.uuid4().hex},
+            request,
+        ]
+        headers = [f"Authorization: Bearer {self._jwt_token()}"]
+        return self._stream_ws(
+            url="wss://api.upbit.com/websocket/v1/private",
+            payload=payload,
+            on_message=on_message,
+            run_seconds=run_seconds,
+            headers=headers,
+            stop_event=stop_event,
+        )
 
     # ---------- Private (signed) APIs ----------
     def _jwt_token(self, query: Optional[Dict[str, Any]] = None) -> str:
@@ -189,7 +271,7 @@ class UpbitAPI:
 
     def create_order(self, market: str, side: str, ord_type: str,
                      volume: Optional[str] = None, price: Optional[str] = None,
-                     simulate: bool = False) -> Dict[str, Any]:
+                     simulate: bool = False, identifier: Optional[str] = None) -> Dict[str, Any]:
         """
         Place an order. Upbit rules:
           - Limit: ord_type=limit, need price + volume
@@ -208,6 +290,7 @@ class UpbitAPI:
                 'ord_type': ord_type,
                 'volume': volume,
                 'price': price,
+                'identifier': identifier,
             }
         if not self.access_key or not self.secret_key:
             raise RuntimeError('API keys required for live order')
@@ -220,11 +303,27 @@ class UpbitAPI:
             query['volume'] = volume
         if price is not None:
             query['price'] = price
+        if identifier is not None:
+            query['identifier'] = identifier
         headers = self._auth_headers(query)
-        r = self.session.post(f"{UPBIT_API_BASE}/orders", json=query, headers=headers, timeout=10)
+        try:
+            r = self.session.post(f"{UPBIT_API_BASE}/orders", json=query, headers=headers, timeout=10)
+        except requests.RequestException as exc:
+            return {
+                "error": str(exc),
+                "exception_type": exc.__class__.__name__,
+                "status_code": None,
+                "identifier": identifier,
+                "market": market,
+                "side": side,
+                "ord_type": ord_type,
+                "volume": volume,
+                "price": price,
+                "ambiguous_submission": identifier is not None,
+            }
         if r.status_code >= 400:
             try:
-                return {'error': r.json(), 'status_code': r.status_code}
+                return {'error': r.json(), 'status_code': r.status_code, 'identifier': identifier}
             except Exception:
                 r.raise_for_status()
         return r.json()

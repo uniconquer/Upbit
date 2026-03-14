@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,7 +15,14 @@ from dotenv import load_dotenv
 try:
     from daily_summary import current_kst_day, rollover_daily_report
     from exchange_state import sync_exchange_state
-    from execution import build_pending_order, pending_fill_delta, resolve_submitted_order
+    from execution import (
+        build_client_order_identifier,
+        build_pending_order,
+        extract_fill_metrics,
+        normalize_ws_order_event,
+        pending_fill_delta,
+        resolve_submitted_order,
+    )
     from kill_switch import effective_kill_switch
     from notifier import get_notifier
     from notification_text import (
@@ -42,7 +50,14 @@ try:
 except ImportError:
     from src.daily_summary import current_kst_day, rollover_daily_report
     from src.exchange_state import sync_exchange_state
-    from src.execution import build_pending_order, pending_fill_delta, resolve_submitted_order
+    from src.execution import (
+        build_client_order_identifier,
+        build_pending_order,
+        extract_fill_metrics,
+        normalize_ws_order_event,
+        pending_fill_delta,
+        resolve_submitted_order,
+    )
     from src.kill_switch import effective_kill_switch
     from src.notifier import get_notifier
     from src.notification_text import (
@@ -216,6 +231,9 @@ class MRMonitor:
         reconcile_timeout_seconds: float = 3.0,
         cost_model: TradingCostModel | None = None,
         kill_switch_name: str = "trade-kill-switch",
+        exchange_sync_interval_seconds: float = 180.0,
+        unknown_order_ttl_seconds: float = 45.0,
+        enable_my_order_stream: bool = True,
     ):
         self.api = api
         self.interval = interval
@@ -232,6 +250,9 @@ class MRMonitor:
         self.reconcile_timeout_seconds = reconcile_timeout_seconds
         self.cost_model = cost_model or cost_model_from_values()
         self.kill_switch_name = kill_switch_name
+        self.exchange_sync_interval_seconds = max(float(exchange_sync_interval_seconds), 30.0)
+        self.unknown_order_ttl_seconds = max(float(unknown_order_ttl_seconds), 10.0)
+        self.enable_my_order_stream = bool(enable_my_order_stream)
         self.notifier = get_notifier()
         self.trader = PaperTrader()
         self.metrics = ensure_daily_metrics({}, day=current_kst_day())
@@ -247,6 +268,10 @@ class MRMonitor:
         self.kill_switch_state = {"enabled": False, "reason": "", "source": "runtime"}
         self._kill_switch_notified_state: tuple[bool, str, str] | None = None
         self._kill_switch_market_notice: dict[str, float] = {}
+        self._order_event_lock = threading.Lock()
+        self._order_events: list[dict[str, Any]] = []
+        self._my_order_thread: threading.Thread | None = None
+        self._my_order_stop_event = threading.Event()
         self._hydrate_state()
 
     def _mode_label(self) -> str:
@@ -331,6 +356,8 @@ class MRMonitor:
             "pending_orders": self.pending_orders,
             "daily_reports": self.daily_reports,
             "last_daily_report_day": self.last_daily_report_day,
+            "exchange_synced": self._exchange_synced,
+            "next_exchange_sync_at": self._next_exchange_sync_at,
         }
 
     def _hydrate_state(self) -> None:
@@ -347,14 +374,53 @@ class MRMonitor:
         self.daily_reports = dict(snapshot.get("daily_reports") or {})
         saved_last_report_day = str(snapshot.get("last_daily_report_day") or "").strip()
         self.last_daily_report_day = saved_last_report_day or None
+        self._exchange_synced = bool(snapshot.get("exchange_synced"))
+        self._next_exchange_sync_at = float(snapshot.get("next_exchange_sync_at") or 0.0)
 
     def _save_state(self) -> None:
         if not self.state_name:
             return
         save_runtime_state(self.state_name, self._runtime_snapshot())
 
+    def _queue_order_event(self, message: Any) -> None:
+        normalized = normalize_ws_order_event(message if isinstance(message, dict) else None)
+        if not normalized.get("uuid") and not normalized.get("identifier"):
+            return
+        with self._order_event_lock:
+            self._order_events.append(normalized)
+            self._order_events = self._order_events[-200:]
+
+    def _drain_order_events(self) -> list[dict[str, Any]]:
+        with self._order_event_lock:
+            events = list(self._order_events)
+            self._order_events.clear()
+        return events
+
+    def _ensure_my_order_stream(self) -> None:
+        if not self.live_orders or not self.enable_my_order_stream:
+            return
+        if self._my_order_thread and self._my_order_thread.is_alive():
+            return
+        stream = getattr(self.api, "stream_my_order", None)
+        if not callable(stream):
+            return
+        self._my_order_stop_event = threading.Event()
+        try:
+            self._my_order_thread = stream(
+                self._queue_order_event,
+                stop_event=self._my_order_stop_event,
+            )
+        except Exception:
+            self._my_order_thread = None
+
+    def _stop_my_order_stream(self) -> None:
+        self._my_order_stop_event.set()
+        if self._my_order_thread and self._my_order_thread.is_alive():
+            self._my_order_thread.join(timeout=0.5)
+        self._my_order_thread = None
+
     def _sync_with_exchange(self) -> None:
-        if not self.live_orders or self._exchange_synced:
+        if not self.live_orders:
             return
         now = time.time()
         if now < self._next_exchange_sync_at:
@@ -365,6 +431,7 @@ class MRMonitor:
             existing_positions=self.trader.to_state(),
             existing_pending_orders=self.pending_orders,
             existing_signal_state=self.last_signal_state,
+            announce_success=not self._exchange_synced,
         )
         self.trader = PaperTrader(result.get("positions"))
         self.pending_orders = dict(result.get("pending_orders") or {})
@@ -372,9 +439,8 @@ class MRMonitor:
         for message in result.get("notifications") or []:
             self._notify(message)
         self._exchange_synced = bool(result.get("synced"))
-        self._next_exchange_sync_at = 0.0 if self._exchange_synced else (now + 60.0)
-        if self._exchange_synced:
-            self._save_state()
+        self._next_exchange_sync_at = now + (self.exchange_sync_interval_seconds if self._exchange_synced else 60.0)
+        self._save_state()
 
     def _refresh_kill_switch(self) -> None:
         state = effective_kill_switch(self.kill_switch_name)
@@ -405,10 +471,27 @@ class MRMonitor:
         ord_type: str,
         volume: str | None = None,
         price: str | None = None,
+        identifier: str | None = None,
     ) -> dict[str, Any]:
         if self.live_orders:
-            return self.api.create_order(market, side=side, ord_type=ord_type, volume=volume, price=price, simulate=False)
-        return self.api.create_order(market, side=side, ord_type=ord_type, volume=volume, price=price, simulate=True)
+            return self.api.create_order(
+                market,
+                side=side,
+                ord_type=ord_type,
+                volume=volume,
+                price=price,
+                simulate=False,
+                identifier=identifier,
+            )
+        return self.api.create_order(
+            market,
+            side=side,
+            ord_type=ord_type,
+            volume=volume,
+            price=price,
+            simulate=True,
+            identifier=identifier,
+        )
 
     def _build_frame(self, market: str) -> pd.DataFrame:
         now = time.time()
@@ -511,19 +594,122 @@ class MRMonitor:
             )
         )
 
+    def _consume_pending_resolution(self, market: str, pending: dict[str, Any], resolution: dict[str, Any]) -> bool:
+        side = str(pending.get("side") or "").lower()
+        status = str(resolution.get("status") or "")
+        fill = dict(resolution.get("fill") or {})
+        updated_pending, delta = pending_fill_delta(pending, fill)
+
+        if float(delta.get("qty") or 0.0) > 0:
+            delta_fill = {
+                "order_uuid": fill.get("order_uuid"),
+                "qty": float(delta["qty"]),
+                "value": float(delta["value"]),
+                "paid_fee": float(delta["paid_fee"]),
+                "cost": float(delta["net_value"]),
+                "price": float(delta["price"] or fill.get("price") or 0.0),
+            }
+            if side == "bid":
+                self._apply_buy_fill(market, None, delta_fill, partial=status == "pending")
+            elif side == "ask":
+                self._apply_sell_fill(market, delta_fill, str(pending.get("reason") or "signal"), partial=status == "pending")
+
+        if status == "pending":
+            unresolved_identifier = bool(updated_pending.get("identifier")) and not updated_pending.get("uuid")
+            age_seconds = time.time() - float(updated_pending.get("submitted_at") or 0.0)
+            if unresolved_identifier and age_seconds >= self.unknown_order_ttl_seconds:
+                self.pending_orders.pop(market, None)
+                self._notify(
+                    lookup_failed_message(
+                        "LIVE",
+                        market=market,
+                        side=side,
+                        error="identifier lookup timeout",
+                    )
+                )
+                if side == "bid":
+                    self.last_signal_state[market] = {"sig": "WAIT", "entry": None}
+                return True
+            self.pending_orders[market] = updated_pending
+            return True
+
+        self.pending_orders.pop(market, None)
+        if status == "cancelled":
+            self._notify(order_cancelled_message("LIVE", market=market, side=side))
+            if side == "bid":
+                self.last_signal_state[market] = {"sig": "WAIT", "entry": None}
+            return True
+        if status == "error":
+            self._notify(lookup_failed_message("LIVE", market=market, side=side, error=resolution.get("error")))
+            return True
+        if side == "bid":
+            if float(updated_pending.get("filled_qty") or 0.0) <= 0 or float(updated_pending.get("filled_net_value") or 0.0) <= 0:
+                self._notify(order_no_fill_message("LIVE", market=market, side="buy"))
+                self.last_signal_state[market] = {"sig": "WAIT", "entry": None}
+                return True
+        elif side == "ask":
+            if float(updated_pending.get("filled_qty") or 0.0) <= 0:
+                self._notify(order_no_fill_message("LIVE", market=market, side="sell"))
+                return True
+        return True
+
+    def _process_order_events(self) -> None:
+        if not self.live_orders:
+            return
+        changed = False
+        for event in self._drain_order_events():
+            market = str(event.get("market") or "")
+            if not market:
+                continue
+            pending_market = None
+            for candidate_market, pending in list(self.pending_orders.items()):
+                if str(pending.get("uuid") or "") and str(pending.get("uuid")) == str(event.get("uuid") or ""):
+                    pending_market = candidate_market
+                    break
+                if str(pending.get("identifier") or "") and str(pending.get("identifier")) == str(event.get("identifier") or ""):
+                    pending_market = candidate_market
+                    break
+            if not pending_market:
+                continue
+            pending = dict(self.pending_orders.get(pending_market) or {})
+            state = str(event.get("state") or "").lower()
+            if state in {"cancel", "prevented"}:
+                status = "cancelled"
+            elif state == "done":
+                status = "filled"
+            else:
+                status = "pending"
+            fill = extract_fill_metrics(
+                event,
+                side=str(pending.get("side") or "").lower(),
+                fallback_price=float(pending.get("fallback_price") or 0.0),
+                fallback_cost=float(pending.get("requested_cost") or 0.0) or None,
+                fallback_qty=float(pending.get("requested_qty") or 0.0) or None,
+            )
+            changed = self._consume_pending_resolution(
+                pending_market,
+                pending,
+                {"status": status, "fill": fill, "order": event},
+            ) or changed
+        if changed:
+            self._save_state()
+
     def _reconcile_pending_orders(self) -> None:
         if not self.live_orders or not self.pending_orders:
             return
         changed = False
         for market, pending in list(self.pending_orders.items()):
-            if not pending.get("uuid"):
+            if not pending.get("uuid") and not pending.get("identifier"):
                 self.pending_orders.pop(market, None)
                 changed = True
                 continue
             side = str(pending.get("side") or "").lower()
             resolution = resolve_submitted_order(
                 self.api,
-                {"uuid": pending["uuid"]},
+                {
+                    "uuid": pending.get("uuid"),
+                    "identifier": pending.get("identifier"),
+                },
                 live_orders=True,
                 side=side,
                 fallback_price=float(pending.get("fallback_price") or 0.0),
@@ -532,44 +718,7 @@ class MRMonitor:
                 timeout_seconds=min(self.reconcile_timeout_seconds, 1.2),
                 poll_interval=0.2,
             )
-            status = str(resolution.get("status") or "")
-            fill = dict(resolution.get("fill") or {})
-            updated_pending, delta = pending_fill_delta(pending, fill)
-            if float(delta.get("qty") or 0.0) > 0:
-                delta_fill = {
-                    "order_uuid": fill.get("order_uuid"),
-                    "qty": float(delta["qty"]),
-                    "value": float(delta["value"]),
-                    "paid_fee": float(delta["paid_fee"]),
-                    "cost": float(delta["net_value"]),
-                    "price": float(delta["price"] or fill.get("price") or 0.0),
-                }
-                if side == "bid":
-                    self._apply_buy_fill(market, None, delta_fill, partial=status == "pending")
-                elif side == "ask":
-                    self._apply_sell_fill(market, delta_fill, str(pending.get("reason") or "signal"), partial=status == "pending")
-            if status == "pending":
-                self.pending_orders[market] = updated_pending
-                continue
-            self.pending_orders.pop(market, None)
-            changed = True
-            if status == "cancelled":
-                self._notify(order_cancelled_message("LIVE", market=market, side=side))
-                if side == "bid":
-                    self.last_signal_state[market] = {"sig": "WAIT", "entry": None}
-                continue
-            if status == "error":
-                self._notify(lookup_failed_message("LIVE", market=market, side=side, error=resolution.get("error")))
-                continue
-            if side == "bid":
-                if float(updated_pending.get("filled_qty") or 0.0) <= 0 or float(updated_pending.get("filled_net_value") or 0.0) <= 0:
-                    self._notify(order_no_fill_message("LIVE", market=market, side="buy"))
-                    self.last_signal_state[market] = {"sig": "WAIT", "entry": None}
-                    continue
-            elif side == "ask":
-                if float(updated_pending.get("filled_qty") or 0.0) <= 0:
-                    self._notify(order_no_fill_message("LIVE", market=market, side="sell"))
-                    continue
+            changed = self._consume_pending_resolution(market, dict(pending), resolution) or changed
         if changed:
             self._save_state()
 
@@ -593,7 +742,14 @@ class MRMonitor:
         if not decision.allowed:
             self._notify(blocked_risk_message(self._mode_label(), market=market, reason=decision.blocked_reason, price=close_price))
             return
-        order_result = self._place_order(market=market, side="bid", ord_type="price", price=f"{int(decision.trade_cost)}")
+        order_identifier = build_client_order_identifier(market, "bid", strategy_name=self.strategy_name)
+        order_result = self._place_order(
+            market=market,
+            side="bid",
+            ord_type="price",
+            price=f"{int(decision.trade_cost)}",
+            identifier=order_identifier,
+        )
         resolution = resolve_submitted_order(
             self.api,
             order_result,
@@ -641,6 +797,7 @@ class MRMonitor:
             side="ask",
             ord_type="market",
             volume=f"{position.qty:.8f}",
+            identifier=build_client_order_identifier(market, "ask", strategy_name=self.strategy_name),
         )
         resolution = resolve_submitted_order(
             self.api,
@@ -747,10 +904,12 @@ class MRMonitor:
     def run_cycle(self, markets: list[str]) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []
         trades_before = len(self.trade_log)
+        self._ensure_my_order_stream()
         self._refresh_metrics()
         self._refresh_kill_switch()
-        self._sync_with_exchange()
+        self._process_order_events()
         self._reconcile_pending_orders()
+        self._sync_with_exchange()
         for market in markets:
             try:
                 row = self.process_market(market)
@@ -793,17 +952,20 @@ class MRMonitor:
             )
         )
         cycle_index = 0
-        while True:
-            cycle_index += 1
-            summary = self.run_cycle(markets)
-            print(
-                f"[cycle {cycle_index}] processed={summary['processed']} open={summary['open']} "
-                f"pending={summary['pending_orders']} kill={'ON' if summary['kill_switch'] else 'OFF'} "
-                f"new_trades={summary['new_trades']} total_pnl={summary['total_pnl']:.0f}"
-            )
-            if cycles and cycle_index >= cycles:
-                break
-            time.sleep(loop_seconds)
+        try:
+            while True:
+                cycle_index += 1
+                summary = self.run_cycle(markets)
+                print(
+                    f"[cycle {cycle_index}] processed={summary['processed']} open={summary['open']} "
+                    f"pending={summary['pending_orders']} kill={'ON' if summary['kill_switch'] else 'OFF'} "
+                    f"new_trades={summary['new_trades']} total_pnl={summary['total_pnl']:.0f}"
+                )
+                if cycles and cycle_index >= cycles:
+                    break
+                time.sleep(loop_seconds)
+        finally:
+            self._stop_my_order_stream()
 
 
 def parse_args():

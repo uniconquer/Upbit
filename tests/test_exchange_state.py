@@ -38,6 +38,11 @@ class SyncAPI:
         ]
 
 
+class EmptyOrdersAPI(SyncAPI):
+    def open_orders(self, market=None, states=None, limit=100, order_by="desc"):
+        return []
+
+
 def test_positions_from_accounts_builds_local_positions():
     positions = positions_from_accounts(
         SyncAPI().accounts(),
@@ -69,3 +74,20 @@ def test_sync_exchange_state_builds_positions_pending_and_signal_state():
     assert "KRW-ETH" in result["pending_orders"]
     assert result["last_signal_state"]["KRW-BTC"]["sig"] == "SELL_PENDING"
     assert result["last_signal_state"]["KRW-ETH"]["sig"] == "BUY_PENDING"
+
+
+def test_sync_exchange_state_clears_stale_pending_orders_when_exchange_is_empty():
+    result = sync_exchange_state(
+        EmptyOrdersAPI(),
+        strategy_name="research_trend",
+        existing_pending_orders={
+            "KRW-BTC": {
+                "uuid": "stale-order",
+                "side": "ask",
+                "strategy": "research_trend",
+            }
+        },
+    )
+
+    assert result["synced"]
+    assert result["pending_orders"] == {}
