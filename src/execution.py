@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from typing import Any, Mapping
@@ -22,6 +23,76 @@ def build_client_order_identifier(market: str, side: str, *, strategy_name: str 
     side_token = str(side or "").lower()[:4] or "side"
     strategy_token = "".join(ch for ch in str(strategy_name or "").lower() if ch.isalnum())[:12] or "strategy"
     return f"codex-{strategy_token}-{market_token}-{side_token}-{uuid.uuid4().hex[:12]}"
+
+
+class OrderEventTracker:
+    def __init__(self, *, max_events: int = 500):
+        self.max_events = max(int(max_events), 50)
+        self._condition = threading.Condition()
+        self._events_by_uuid: dict[str, dict[str, Any]] = {}
+        self._events_by_identifier: dict[str, dict[str, Any]] = {}
+        self._event_order: list[tuple[str, str]] = []
+
+    def push(self, event: Mapping[str, Any] | None) -> dict[str, Any]:
+        normalized = normalize_ws_order_event(event)
+        event_uuid = str(normalized.get("uuid") or "").strip()
+        event_identifier = str(normalized.get("identifier") or "").strip()
+        if not event_uuid and not event_identifier:
+            return normalized
+        with self._condition:
+            if event_uuid:
+                self._events_by_uuid[event_uuid] = normalized
+                self._event_order.append(("uuid", event_uuid))
+            if event_identifier:
+                self._events_by_identifier[event_identifier] = normalized
+                self._event_order.append(("identifier", event_identifier))
+            while len(self._event_order) > self.max_events:
+                kind, value = self._event_order.pop(0)
+                if kind == "uuid":
+                    self._events_by_uuid.pop(value, None)
+                else:
+                    self._events_by_identifier.pop(value, None)
+            self._condition.notify_all()
+        return normalized
+
+    def latest(self, *, uuid: str | None = None, identifier: str | None = None) -> dict[str, Any] | None:
+        key_uuid = str(uuid or "").strip()
+        key_identifier = str(identifier or "").strip()
+        with self._condition:
+            if key_uuid and key_uuid in self._events_by_uuid:
+                return dict(self._events_by_uuid[key_uuid])
+            if key_identifier and key_identifier in self._events_by_identifier:
+                return dict(self._events_by_identifier[key_identifier])
+        return None
+
+    def wait_for_order(
+        self,
+        *,
+        uuid: str | None = None,
+        identifier: str | None = None,
+        timeout_seconds: float = 3.0,
+    ) -> dict[str, Any] | None:
+        key_uuid = str(uuid or "").strip()
+        key_identifier = str(identifier or "").strip()
+        if not key_uuid and not key_identifier:
+            return None
+        deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
+        latest_event: dict[str, Any] | None = None
+        with self._condition:
+            while True:
+                if key_uuid and key_uuid in self._events_by_uuid:
+                    latest_event = dict(self._events_by_uuid[key_uuid])
+                elif key_identifier and key_identifier in self._events_by_identifier:
+                    latest_event = dict(self._events_by_identifier[key_identifier])
+                state = str((latest_event or {}).get("state") or "").lower()
+                remaining = _to_float((latest_event or {}).get("remaining_volume"))
+                executed = _to_float((latest_event or {}).get("executed_volume"))
+                if latest_event and (state in TERMINAL_STATES or executed > 0 or remaining > 0):
+                    return latest_event
+                remaining_wait = deadline - time.monotonic()
+                if remaining_wait <= 0:
+                    return latest_event
+                self._condition.wait(timeout=min(remaining_wait, 0.25))
 
 
 def normalize_ws_order_event(event: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -142,6 +213,7 @@ def resolve_submitted_order(
     order_result: Mapping[str, Any] | None,
     *,
     live_orders: bool,
+    event_tracker: OrderEventTracker | None = None,
     side: str | None = None,
     fallback_price: float,
     fallback_cost: float | None = None,
@@ -157,12 +229,19 @@ def resolve_submitted_order(
 
     if live_orders and raw_result.get("error") and order_identifier:
         try:
-            looked_up = wait_for_order_completion(
-                api,
-                identifier=str(order_identifier),
-                timeout_seconds=timeout_seconds,
-                poll_interval=poll_interval,
-            )
+            looked_up = None
+            if event_tracker is not None:
+                looked_up = event_tracker.wait_for_order(
+                    identifier=str(order_identifier),
+                    timeout_seconds=timeout_seconds,
+                )
+            if not looked_up:
+                looked_up = wait_for_order_completion(
+                    api,
+                    identifier=str(order_identifier),
+                    timeout_seconds=timeout_seconds,
+                    poll_interval=poll_interval,
+                )
             if looked_up:
                 resolved_order = looked_up
                 order_uuid = looked_up.get("uuid")
@@ -172,16 +251,26 @@ def resolve_submitted_order(
 
     if live_orders and (order_uuid or order_identifier):
         try:
-            resolved_order = (
-                wait_for_order_completion(
-                    api,
+            looked_up = None
+            if event_tracker is not None:
+                looked_up = event_tracker.wait_for_order(
                     uuid=str(order_uuid) if order_uuid else None,
                     identifier=str(order_identifier) if order_identifier else None,
                     timeout_seconds=timeout_seconds,
-                    poll_interval=poll_interval,
                 )
-                or raw_result
-            )
+            if looked_up:
+                resolved_order = looked_up
+            else:
+                resolved_order = (
+                    wait_for_order_completion(
+                        api,
+                        uuid=str(order_uuid) if order_uuid else None,
+                        identifier=str(order_identifier) if order_identifier else None,
+                        timeout_seconds=timeout_seconds,
+                        poll_interval=poll_interval,
+                    )
+                    or raw_result
+                )
         except Exception as exc:
             resolved_order = dict(raw_result)
             resolved_order["lookup_error"] = repr(exc)

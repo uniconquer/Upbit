@@ -286,6 +286,22 @@ def test_fetch_top_markets_excludes_requested_markets():
     assert markets == ["KRW-USDT"]
 
 
+def test_monitor_sync_ignores_excluded_markets(monkeypatch):
+    monkeypatch.setenv("UPBIT_LIVE", "1")
+    api = ExchangeSyncAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        live_orders=True,
+        excluded_markets=["KRW-BTC"],
+    )
+
+    monitor._sync_with_exchange()
+
+    assert monitor.trader.to_state() == {}
+    assert monitor.pending_orders == {}
+
+
 def test_monitor_opens_and_closes_position():
     api = FakeAPI()
     monitor = MRMonitor(

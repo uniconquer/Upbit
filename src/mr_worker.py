@@ -16,6 +16,7 @@ try:
     from daily_summary import current_kst_day, rollover_daily_report
     from exchange_state import sync_exchange_state
     from execution import (
+        OrderEventTracker,
         build_client_order_identifier,
         build_pending_order,
         extract_fill_metrics,
@@ -51,6 +52,7 @@ except ImportError:
     from src.daily_summary import current_kst_day, rollover_daily_report
     from src.exchange_state import sync_exchange_state
     from src.execution import (
+        OrderEventTracker,
         build_client_order_identifier,
         build_pending_order,
         extract_fill_metrics,
@@ -265,6 +267,7 @@ class MRMonitor:
         exchange_sync_interval_seconds: float = 180.0,
         unknown_order_ttl_seconds: float = 45.0,
         enable_my_order_stream: bool = True,
+        excluded_markets: list[str] | None = None,
     ):
         self.api = api
         self.interval = interval
@@ -284,6 +287,7 @@ class MRMonitor:
         self.exchange_sync_interval_seconds = max(float(exchange_sync_interval_seconds), 30.0)
         self.unknown_order_ttl_seconds = max(float(unknown_order_ttl_seconds), 10.0)
         self.enable_my_order_stream = bool(enable_my_order_stream)
+        self.excluded_markets = normalize_market_codes(excluded_markets)
         self.notifier = get_notifier()
         self.trader = PaperTrader()
         self.metrics = ensure_daily_metrics({}, day=current_kst_day())
@@ -301,6 +305,7 @@ class MRMonitor:
         self._kill_switch_market_notice: dict[str, float] = {}
         self._order_event_lock = threading.Lock()
         self._order_events: list[dict[str, Any]] = []
+        self._order_event_tracker = OrderEventTracker()
         self._my_order_thread: threading.Thread | None = None
         self._my_order_stop_event = threading.Event()
         self._hydrate_state()
@@ -417,6 +422,7 @@ class MRMonitor:
         normalized = normalize_ws_order_event(message if isinstance(message, dict) else None)
         if not normalized.get("uuid") and not normalized.get("identifier"):
             return
+        self._order_event_tracker.push(normalized)
         with self._order_event_lock:
             self._order_events.append(normalized)
             self._order_events = self._order_events[-200:]
@@ -462,6 +468,7 @@ class MRMonitor:
             existing_positions=self.trader.to_state(),
             existing_pending_orders=self.pending_orders,
             existing_signal_state=self.last_signal_state,
+            excluded_markets=self.excluded_markets,
             announce_success=not self._exchange_synced,
         )
         self.trader = PaperTrader(result.get("positions"))
@@ -742,6 +749,7 @@ class MRMonitor:
                     "identifier": pending.get("identifier"),
                 },
                 live_orders=True,
+                event_tracker=self._order_event_tracker,
                 side=side,
                 fallback_price=float(pending.get("fallback_price") or 0.0),
                 fallback_cost=float(pending.get("requested_cost") or 0.0) or None,
@@ -785,6 +793,7 @@ class MRMonitor:
             self.api,
             order_result,
             live_orders=self.live_orders,
+            event_tracker=self._order_event_tracker if self.live_orders else None,
             side="bid",
             fallback_price=close_price,
             fallback_cost=decision.trade_cost,
@@ -834,6 +843,7 @@ class MRMonitor:
             self.api,
             order_result,
             live_orders=self.live_orders,
+            event_tracker=self._order_event_tracker if self.live_orders else None,
             side="ask",
             fallback_price=close_price,
             fallback_qty=position.qty,
@@ -1100,6 +1110,7 @@ def main():
         reconcile_timeout_seconds=args.reconcile_timeout_seconds,
         cost_model=cost_model_from_values(fee_rate=args.fee, slippage_bps=args.slippage_bps),
         kill_switch_name=args.kill_switch_name,
+        excluded_markets=excluded_markets,
     )
     if args.live_orders and os.getenv("UPBIT_LIVE") != "1":
         print("[WARN] --live-orders was set but UPBIT_LIVE is not 1, so the monitor stays in SIM mode.")

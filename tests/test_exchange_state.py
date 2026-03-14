@@ -53,6 +53,15 @@ def test_positions_from_accounts_builds_local_positions():
     assert positions["KRW-BTC"]["strategy"] == "flux_trend"
 
 
+def test_positions_from_accounts_skips_excluded_markets():
+    positions = positions_from_accounts(
+        SyncAPI().accounts(),
+        excluded_markets=["KRW-BTC"],
+    )
+
+    assert "KRW-BTC" not in positions
+
+
 def test_pending_orders_from_open_orders_maps_bid_and_ask():
     pending = pending_orders_from_open_orders(
         SyncAPI().open_orders(),
@@ -62,6 +71,16 @@ def test_pending_orders_from_open_orders_maps_bid_and_ask():
     assert pending["KRW-ETH"]["requested_cost"] == 120.0
     assert pending["KRW-BTC"]["requested_qty"] == 0.005
     assert pending["KRW-BTC"]["side"] == "ask"
+
+
+def test_pending_orders_from_open_orders_skips_excluded_markets():
+    pending = pending_orders_from_open_orders(
+        SyncAPI().open_orders(),
+        strategy_name="research_trend",
+        excluded_markets=["KRW-BTC", "ETH"],
+    )
+
+    assert pending == {}
 
 
 def test_sync_exchange_state_builds_positions_pending_and_signal_state():
@@ -74,6 +93,19 @@ def test_sync_exchange_state_builds_positions_pending_and_signal_state():
     assert "KRW-ETH" in result["pending_orders"]
     assert result["last_signal_state"]["KRW-BTC"]["sig"] == "SELL_PENDING"
     assert result["last_signal_state"]["KRW-ETH"]["sig"] == "BUY_PENDING"
+
+
+def test_sync_exchange_state_skips_excluded_positions_and_orders():
+    result = sync_exchange_state(
+        SyncAPI(),
+        strategy_name="research_trend",
+        excluded_markets=["KRW-BTC", "ETH"],
+    )
+
+    assert result["synced"]
+    assert result["positions"] == {}
+    assert result["pending_orders"] == {}
+    assert result["last_signal_state"] == {}
 
 
 def test_sync_exchange_state_clears_stale_pending_orders_when_exchange_is_empty():

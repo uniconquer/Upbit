@@ -11,7 +11,7 @@ from plotly.subplots import make_subplots
 
 from daily_summary import current_kst_day, rollover_daily_report
 from exchange_state import sync_exchange_state
-from execution import build_client_order_identifier, build_pending_order, pending_fill_delta, resolve_submitted_order
+from execution import OrderEventTracker, build_client_order_identifier, build_pending_order, pending_fill_delta, resolve_submitted_order
 from kill_switch import effective_kill_switch, load_kill_switch, save_kill_switch
 from notifier import get_notifier
 from notification_text import (
@@ -620,6 +620,7 @@ def _sync_live_exchange_state(params: dict, last_state: dict) -> dict:
         existing_positions=params.get("_positions"),
         existing_pending_orders=params.get("_pending_orders"),
         existing_signal_state=last_state,
+        excluded_markets=params.get("exclude_markets"),
         announce_success=not bool(params.get("_exchange_synced")),
     )
 
@@ -805,6 +806,7 @@ def _reconcile_pending_orders(
             api,
             {"uuid": pending.get("uuid"), "identifier": pending.get("identifier")},
             live_orders=True,
+            event_tracker=params.get("_order_event_tracker"),
             side=str(pending.get("side") or "").lower(),
             fallback_price=float(pending.get("fallback_price") or 0.0),
             fallback_cost=float(pending.get("requested_cost") or 0.0) or None,
@@ -1058,6 +1060,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                     api,
                     order_result,
                     live_orders=live_orders,
+                    event_tracker=params.get("_order_event_tracker") if live_orders else None,
                     side="bid",
                     fallback_price=close_price,
                     fallback_cost=decision.trade_cost,
@@ -1138,6 +1141,7 @@ def _scan_core(params: dict, last_state: dict) -> dict:
                 api,
                 order_result,
                 live_orders=live_orders,
+                event_tracker=params.get("_order_event_tracker") if live_orders else None,
                 side="ask",
                 fallback_price=close_price,
                 fallback_qty=position.qty,
@@ -1321,6 +1325,9 @@ class _Worker:
         self.exchange_sync_due_at = 0.0
         self.last_error: str | None = None
         self.interval = 30
+        self.order_event_tracker = OrderEventTracker()
+        self.my_order_thread = None
+        self.my_order_stop_event = threading.Event()
 
     def update_params(self, params: dict):
         with self.lock:
@@ -1334,6 +1341,7 @@ class _Worker:
         self.stop()
         self.interval = interval
         self.update_params(params)
+        self.order_event_tracker = OrderEventTracker()
         initial_state = dict(initial_state or {})
         if "metrics" in initial_state:
             self.metrics = dict(initial_state.get("metrics") or {})
@@ -1360,6 +1368,7 @@ class _Worker:
             while not self.stop_event.is_set():
                 try:
                     params = self._get_params()
+                    self._ensure_my_order_stream(params)
                     params["_metrics"] = self.metrics
                     params["_positions"] = self.positions
                     params["_pending_orders"] = self.pending_orders
@@ -1368,6 +1377,7 @@ class _Worker:
                     params["_last_daily_report_day"] = self.last_daily_report_day
                     params["_exchange_synced"] = self.exchange_synced
                     params["_exchange_sync_due_at"] = self.exchange_sync_due_at
+                    params["_order_event_tracker"] = self.order_event_tracker
                     snapshot = _scan_core(params, self.last_signal_state)
                     notifier = get_notifier()
                     if notifier.available():
@@ -1410,6 +1420,7 @@ class _Worker:
                 except Exception as exc:
                     self.last_error = repr(exc)
                 self.stop_event.wait(self.interval)
+            self._stop_my_order_stream()
 
         self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()
@@ -1418,6 +1429,36 @@ class _Worker:
         if self.thread and self.thread.is_alive():
             self.stop_event.set()
             self.thread.join(timeout=0.5)
+        self._stop_my_order_stream()
+
+    def _queue_order_event(self, message):
+        self.order_event_tracker.push(message if isinstance(message, dict) else None)
+
+    def _ensure_my_order_stream(self, params: dict):
+        if not bool(params.get("live_trading")):
+            self._stop_my_order_stream()
+            return
+        if self.my_order_thread and self.my_order_thread.is_alive():
+            return
+        if not api:
+            return
+        stream = getattr(api, "stream_my_order", None)
+        if not callable(stream):
+            return
+        self.my_order_stop_event = threading.Event()
+        try:
+            self.my_order_thread = stream(
+                self._queue_order_event,
+                stop_event=self.my_order_stop_event,
+            )
+        except Exception:
+            self.my_order_thread = None
+
+    def _stop_my_order_stream(self):
+        self.my_order_stop_event.set()
+        if self.my_order_thread and self.my_order_thread.is_alive():
+            self.my_order_thread.join(timeout=0.5)
+        self.my_order_thread = None
 
     def get_snapshot(self):
         with self.lock:

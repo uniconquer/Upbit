@@ -18,6 +18,28 @@ def _to_float(value: Any) -> float:
         return 0.0
 
 
+def _normalize_market_codes(values: Any, *, quote_currency: str = "KRW") -> set[str]:
+    prefix = quote_currency.upper() + "-"
+    tokens: list[str] = []
+    if values is None:
+        return set()
+    if isinstance(values, str):
+        tokens = values.split(",")
+    else:
+        for value in values:
+            if isinstance(value, str):
+                tokens.extend(value.split(","))
+            elif value is not None:
+                tokens.append(str(value))
+    normalized: set[str] = set()
+    for token in tokens:
+        raw = str(token or "").strip().upper()
+        if not raw:
+            continue
+        normalized.add(raw if "-" in raw else f"{prefix}{raw}")
+    return normalized
+
+
 def positions_from_accounts(
     accounts: list[Mapping[str, Any]],
     *,
@@ -25,17 +47,21 @@ def positions_from_accounts(
     quote_currency: str = "KRW",
     strategy_name: str = "research_trend",
     now_ts: float | None = None,
+    excluded_markets: Any = None,
 ) -> dict[str, dict[str, Any]]:
     existing_positions = existing_positions or {}
     quote_currency = quote_currency.upper()
     now_ts = float(now_ts or time.time())
     positions: dict[str, dict[str, Any]] = {}
+    excluded = _normalize_market_codes(excluded_markets, quote_currency=quote_currency)
 
     for account in accounts:
         currency = str(account.get("currency") or "").upper()
         if not currency or currency == quote_currency:
             continue
         market = f"{quote_currency}-{currency}"
+        if market in excluded:
+            continue
         qty = _to_float(account.get("balance")) + _to_float(account.get("locked"))
         if qty <= 0:
             continue
@@ -64,15 +90,19 @@ def pending_orders_from_open_orders(
     existing_pending_orders: Mapping[str, Mapping[str, Any]] | None = None,
     existing_positions: Mapping[str, Mapping[str, Any]] | None = None,
     quote_currency: str = "KRW",
+    excluded_markets: Any = None,
 ) -> dict[str, dict[str, Any]]:
     existing_pending_orders = existing_pending_orders or {}
     existing_positions = existing_positions or {}
     quote_prefix = quote_currency.upper() + "-"
     pending_orders: dict[str, dict[str, Any]] = {}
+    excluded = _normalize_market_codes(excluded_markets, quote_currency=quote_currency)
 
     for order in orders:
         market = str(order.get("market") or "")
         if not market.startswith(quote_prefix):
+            continue
+        if market.upper() in excluded:
             continue
         side = str(order.get("side") or "").lower()
         if side not in {"bid", "ask"}:
@@ -156,6 +186,7 @@ def sync_exchange_state(
     existing_pending_orders: Mapping[str, Mapping[str, Any]] | None = None,
     existing_signal_state: Mapping[str, Mapping[str, Any]] | None = None,
     quote_currency: str = "KRW",
+    excluded_markets: Any = None,
     announce_success: bool = True,
 ) -> dict[str, Any]:
     positions = dict(existing_positions or {})
@@ -171,6 +202,7 @@ def sync_exchange_state(
             existing_positions=positions,
             quote_currency=quote_currency,
             strategy_name=strategy_name,
+            excluded_markets=excluded_markets,
         )
         accounts_ok = True
     except Exception as exc:
@@ -184,6 +216,7 @@ def sync_exchange_state(
             existing_pending_orders=pending_orders,
             existing_positions=positions,
             quote_currency=quote_currency,
+            excluded_markets=excluded_markets,
         )
         pending_orders = mapped_pending_orders
         orders_ok = True
