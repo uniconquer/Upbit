@@ -60,6 +60,15 @@ _SERIES_LABELS = {
     "flux_sell_signal": "원본 플럭스 매도",
 }
 
+_SERIES_LABELS.update(
+    {
+        "rs_short": "단기 상대강도",
+        "rs_mid": "중기 상대강도",
+        "rs_long": "장기 상대강도",
+        "volume_ratio": "거래량 비율",
+    }
+)
+
 _BACKTEST_DEFAULT_PARAMS: dict[str, dict[str, object]] = {
     "research_trend": {
         "fast_ema": 21,
@@ -73,6 +82,19 @@ _BACKTEST_DEFAULT_PARAMS: dict[str, dict[str, object]] = {
         "momentum_window": 20,
         "volume_window": 20,
         "volume_threshold": 0.9,
+    },
+    "relative_strength_rotation": {
+        "rs_short_window": 10,
+        "rs_mid_window": 30,
+        "rs_long_window": 90,
+        "trend_ema_window": 55,
+        "breakout_window": 20,
+        "atr_window": 14,
+        "atr_mult": 2.2,
+        "volume_window": 20,
+        "volume_threshold": 0.9,
+        "entry_score": 8.0,
+        "exit_score": 2.0,
     },
     "flux_trend": {
         "ltf_len": 20,
@@ -108,6 +130,19 @@ _BACKTEST_WIDGET_KEYS: dict[str, dict[str, str]] = {
         "momentum_window": "bt_research_momentum_window",
         "volume_window": "bt_research_volume_window",
         "volume_threshold": "bt_research_volume_threshold",
+    },
+    "relative_strength_rotation": {
+        "rs_short_window": "bt_rs_short_window",
+        "rs_mid_window": "bt_rs_mid_window",
+        "rs_long_window": "bt_rs_long_window",
+        "trend_ema_window": "bt_rs_trend_ema_window",
+        "breakout_window": "bt_rs_breakout_window",
+        "atr_window": "bt_rs_atr_window",
+        "atr_mult": "bt_rs_atr_mult",
+        "volume_window": "bt_rs_volume_window",
+        "volume_threshold": "bt_rs_volume_threshold",
+        "entry_score": "bt_rs_entry_score",
+        "exit_score": "bt_rs_exit_score",
     },
     "flux_trend": {
         "ltf_len": "bt_flux_ltf_len",
@@ -304,6 +339,84 @@ def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
             params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1, key="bt_research_momentum_window")
             params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1, key="bt_research_volume_window")
             params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key="bt_research_volume_threshold")
+    elif strategy_name == "relative_strength_rotation":
+        with st.expander("상대강도 로테이션 설정", expanded=False):
+            row1 = st.columns(4)
+            params["rs_short_window"] = row1[0].number_input("단기 상대강도 창", 3, 80, 10, 1, key="bt_rs_short_window")
+            params["rs_mid_window"] = row1[1].number_input("중기 상대강도 창", 5, 160, 30, 1, key="bt_rs_mid_window")
+            params["rs_long_window"] = row1[2].number_input("장기 상대강도 창", 10, 320, 90, 1, key="bt_rs_long_window")
+            params["trend_ema_window"] = row1[3].number_input("추세 EMA 길이", 10, 240, 55, 1, key="bt_rs_trend_ema_window")
+            row2 = st.columns(4)
+            params["breakout_window"] = row2[0].number_input("돌파 창", 5, 120, 20, 1, key="bt_rs_breakout_window")
+            params["atr_window"] = row2[1].number_input("ATR 창", 5, 50, 14, 1, key="bt_rs_atr_window")
+            params["atr_mult"] = row2[2].number_input("ATR 배수", 1.0, 6.0, 2.2, 0.1, key="bt_rs_atr_mult")
+            params["volume_window"] = row2[3].number_input("거래량 창", 5, 80, 20, 1, key="bt_rs_volume_window")
+            row3 = st.columns(3)
+            params["volume_threshold"] = row3[0].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key="bt_rs_volume_threshold")
+            params["entry_score"] = row3[1].number_input("진입 점수", -20.0, 40.0, 8.0, 0.5, key="bt_rs_entry_score")
+            params["exit_score"] = row3[2].number_input("청산 점수", -20.0, 40.0, 2.0, 0.5, key="bt_rs_exit_score")
+    elif strategy_name == "relative_strength_rotation":
+        ordered = [
+            "rs_short_window",
+            "rs_mid_window",
+            "rs_long_window",
+            "trend_ema_window",
+            "breakout_window",
+            "entry_score",
+            "exit_score",
+            "trades",
+            "buy_signals",
+            "sell_signals",
+            "total_return_pct",
+            "win_rate_pct",
+            "max_drawdown_pct",
+        ]
+        rename_map = {
+            "rs_short_window": "단기 RS 창",
+            "rs_mid_window": "중기 RS 창",
+            "rs_long_window": "장기 RS 창",
+            "trend_ema_window": "추세 EMA",
+            "breakout_window": "돌파 창",
+            "entry_score": "진입 점수",
+            "exit_score": "청산 점수",
+            "trades": "거래 수",
+            "buy_signals": "매수 신호 수",
+            "sell_signals": "매도 신호 수",
+            "total_return_pct": "수익률",
+            "win_rate_pct": "승률",
+            "max_drawdown_pct": "최대 낙폭",
+        }
+    elif strategy_name == "relative_strength_rotation":
+        ordered = [
+            "rs_short_window",
+            "rs_mid_window",
+            "rs_long_window",
+            "trend_ema_window",
+            "breakout_window",
+            "entry_score",
+            "exit_score",
+            "trades",
+            "buy_signals",
+            "sell_signals",
+            "total_return_pct",
+            "win_rate_pct",
+            "max_drawdown_pct",
+        ]
+        rename_map = {
+            "rs_short_window": "단기 RS 창",
+            "rs_mid_window": "중기 RS 창",
+            "rs_long_window": "장기 RS 창",
+            "trend_ema_window": "추세 EMA",
+            "breakout_window": "돌파 창",
+            "entry_score": "진입 점수",
+            "exit_score": "청산 점수",
+            "trades": "거래 수",
+            "buy_signals": "매수 신호 수",
+            "sell_signals": "매도 신호 수",
+            "total_return_pct": "수익률",
+            "win_rate_pct": "승률",
+            "max_drawdown_pct": "최대 낙폭",
+        }
     elif strategy_name == "flux_trend":
         with st.expander("플럭스 추세 밴드 설정", expanded=False):
             row = st.columns(5)
@@ -399,6 +512,11 @@ def _strategy_param_summary(strategy_name: str, params: dict[str, object]) -> st
         return (
             f"EMA {int(params.get('fast_ema', 21))}/{int(params.get('slow_ema', 55))} · "
             f"돌파 {int(params.get('breakout_window', 20))} · ADX {float(params.get('adx_threshold', 18.0)):.1f}"
+        )
+    if strategy_name == "relative_strength_rotation":
+        return (
+            f"RS {int(params.get('rs_short_window', 10))}/{int(params.get('rs_mid_window', 30))}/{int(params.get('rs_long_window', 90))} · "
+            f"EMA {int(params.get('trend_ema_window', 55))} · 진입 {float(params.get('entry_score', 8.0)):.1f}"
         )
     if strategy_name == "flux_trend":
         return (
@@ -641,8 +759,9 @@ def _present_sweep_results(results: pd.DataFrame, strategy_name: str) -> pd.Data
 
 def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, object]):
     is_research = strategy_name == "research_trend"
-    rows = 4 if is_research else 3
-    row_heights = [0.56, 0.16, 0.14, 0.14] if is_research else [0.64, 0.18, 0.18]
+    is_rotation = strategy_name == "relative_strength_rotation"
+    rows = 4 if (is_research or is_rotation) else 3
+    row_heights = [0.56, 0.16, 0.14, 0.14] if (is_research or is_rotation) else [0.64, 0.18, 0.18]
     figure = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=row_heights, vertical_spacing=0.03)
     figure.add_trace(
         go.Candlestick(
@@ -696,6 +815,35 @@ def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, 
                     x=frame.index,
                     y=frame["strategy_score"],
                     name=_SERIES_LABELS["strategy_score"],
+                    line={"color": "#2dd4bf", "width": 1.6},
+                ),
+                row=4,
+                col=1,
+            )
+    elif is_rotation:
+        for column, color in [
+            ("trend_ema", "#fde047"),
+            ("atr_stop", "#fb7185"),
+            ("breakout_high", "rgba(45, 212, 191, 0.40)"),
+        ]:
+            if column in frame:
+                figure.add_trace(
+                    go.Scatter(
+                        x=frame.index,
+                        y=frame[column],
+                        name=_SERIES_LABELS.get(column, column),
+                        line={"color": color, "width": 1.4},
+                    ),
+                    row=1,
+                    col=1,
+                )
+        figure.add_trace(go.Bar(x=frame.index, y=frame["volume"], name="거래량", marker_color="rgba(96,165,250,0.55)"), row=3, col=1)
+        if "strategy_score" in frame:
+            figure.add_trace(
+                go.Scatter(
+                    x=frame.index,
+                    y=frame["strategy_score"],
+                    name=_SERIES_LABELS.get("strategy_score", "전략 점수"),
                     line={"color": "#2dd4bf", "width": 1.6},
                 ),
                 row=4,
@@ -790,7 +938,7 @@ def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, 
     else:
         figure.update_yaxes(title_text="거래량", row=3, col=1)
 
-    return apply_chart_theme(figure, height=920 if is_research else 860)
+    return apply_chart_theme(figure, height=920 if (is_research or is_rotation) else 860)
 
 
 def render_backtest():
@@ -913,12 +1061,19 @@ def render_backtest():
         columns = ["close", "strategy_score", "buy_signal", "sell_signal"]
         if strategy_name == "research_trend":
             columns.extend(["ema_fast", "ema_slow", "adx", "atr"])
+        elif strategy_name == "relative_strength_rotation":
+            columns.extend(["rs_short", "rs_mid", "rs_long", "trend_ema", "volume_ratio", "atr_stop"])
         elif strategy_name == "flux_ema_filter":
             columns.extend(["strength", "ema_buy", "ema_sell", "flux_buy_signal", "flux_sell_signal"])
         visible = tail[[column for column in columns if column in tail.columns]].rename(
             columns={
                 "close": "종가",
                 "strategy_score": "전략 점수",
+                "rs_short": "단기 RS",
+                "rs_mid": "중기 RS",
+                "rs_long": "장기 RS",
+                "trend_ema": "추세 EMA",
+                "volume_ratio": "거래량 비율",
                 "buy_signal": "매수 신호",
                 "sell_signal": "매도 신호",
                 "ema_fast": "빠른 EMA",
@@ -1008,6 +1163,44 @@ def render_backtest():
                     ),
                     "adx_threshold": _parse_sweep_values(
                         sweep_cols2[1].text_input("ADX 기준 후보", "16, 18, 20", key="bt_sweep_adx_threshold"),
+                        float,
+                    ),
+                }
+            elif strategy_name == "relative_strength_rotation":
+                sweep_cols1 = st.columns(3)
+                sweep_cols2 = st.columns(3)
+                sweep_cols3 = st.columns(2)
+                grid = {
+                    "rs_short_window": _parse_sweep_values(
+                        sweep_cols1[0].text_input("단기 RS 후보", "8, 10, 14", key="bt_sweep_rs_short_window"),
+                        int,
+                    ),
+                    "rs_mid_window": _parse_sweep_values(
+                        sweep_cols1[1].text_input("중기 RS 후보", "20, 30, 45", key="bt_sweep_rs_mid_window"),
+                        int,
+                    ),
+                    "rs_long_window": _parse_sweep_values(
+                        sweep_cols1[2].text_input("장기 RS 후보", "60, 90, 120", key="bt_sweep_rs_long_window"),
+                        int,
+                    ),
+                    "trend_ema_window": _parse_sweep_values(
+                        sweep_cols2[0].text_input("추세 EMA 후보", "34, 55, 80", key="bt_sweep_rs_trend_ema_window"),
+                        int,
+                    ),
+                    "breakout_window": _parse_sweep_values(
+                        sweep_cols2[1].text_input("돌파 창 후보", "14, 20, 28", key="bt_sweep_rs_breakout_window"),
+                        int,
+                    ),
+                    "entry_score": _parse_sweep_values(
+                        sweep_cols2[2].text_input("진입 점수 후보", "6, 8, 10", key="bt_sweep_rs_entry_score"),
+                        float,
+                    ),
+                    "exit_score": _parse_sweep_values(
+                        sweep_cols3[0].text_input("청산 점수 후보", "0, 2, 4", key="bt_sweep_rs_exit_score"),
+                        float,
+                    ),
+                    "atr_mult": _parse_sweep_values(
+                        sweep_cols3[1].text_input("ATR 배수 후보", "1.8, 2.2, 2.6", key="bt_sweep_rs_atr_mult"),
                         float,
                     ),
                 }
@@ -1138,6 +1331,11 @@ def render_backtest():
                     best_cols[2].metric("1위 거래 수", int(best["trades"]))
                     if strategy_name == "research_trend":
                         label = f"EMA {int(best['fast_ema'])}/{int(best['slow_ema'])} · 돌파 {int(best['breakout_window'])}"
+                    elif strategy_name == "relative_strength_rotation":
+                        label = (
+                            f"RS {int(best['rs_short_window'])}/{int(best['rs_mid_window'])}/{int(best['rs_long_window'])} 쨌 "
+                            f"EMA {int(best['trend_ema_window'])} 쨌 吏꾩엯 {float(best['entry_score']):.1f}"
+                        )
                     elif strategy_name == "flux_trend":
                         label = f"LTF {int(best['ltf_len'])}/{float(best['ltf_mult']):.2f} · HTF {best['htf_rule']}"
                     else:

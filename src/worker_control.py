@@ -102,6 +102,12 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "momentum_window": _to_int(os.getenv("UPBIT_WORKER_MOMENTUM_WINDOW"), 20),
         "volume_window": _to_int(os.getenv("UPBIT_WORKER_VOLUME_WINDOW"), 20),
         "volume_threshold": _to_float(os.getenv("UPBIT_WORKER_VOLUME_THRESHOLD"), 0.9),
+        "rs_short_window": _to_int(os.getenv("UPBIT_WORKER_RS_SHORT_WINDOW"), 10),
+        "rs_mid_window": _to_int(os.getenv("UPBIT_WORKER_RS_MID_WINDOW"), 30),
+        "rs_long_window": _to_int(os.getenv("UPBIT_WORKER_RS_LONG_WINDOW"), 90),
+        "trend_ema_window": _to_int(os.getenv("UPBIT_WORKER_TREND_EMA_WINDOW"), 55),
+        "entry_score": _to_float(os.getenv("UPBIT_WORKER_ENTRY_SCORE"), 8.0),
+        "exit_score": _to_float(os.getenv("UPBIT_WORKER_EXIT_SCORE"), 2.0),
         "ltf_len": _to_int(os.getenv("UPBIT_WORKER_LTF_LEN"), 20),
         "ltf_mult": _to_float(os.getenv("UPBIT_WORKER_LTF_MULT"), 2.0),
         "htf_len": _to_int(os.getenv("UPBIT_WORKER_HTF_LEN"), 20),
@@ -158,6 +164,10 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "adx_window",
         "momentum_window",
         "volume_window",
+        "rs_short_window",
+        "rs_mid_window",
+        "rs_long_window",
+        "trend_ema_window",
         "ltf_len",
         "htf_len",
         "sensitivity",
@@ -172,6 +182,8 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "atr_mult": defaults["atr_mult"],
         "adx_threshold": defaults["adx_threshold"],
         "volume_threshold": defaults["volume_threshold"],
+        "entry_score": defaults["entry_score"],
+        "exit_score": defaults["exit_score"],
         "ltf_mult": defaults["ltf_mult"],
         "htf_mult": defaults["htf_mult"],
     }
@@ -269,6 +281,33 @@ def build_worker_command(config: Mapping[str, Any]) -> list[str]:
                 str(cfg["volume_window"]),
                 "--volume-threshold",
                 str(cfg["volume_threshold"]),
+            ]
+        )
+    elif cfg["strategy"] == "relative_strength_rotation":
+        command.extend(
+            [
+                "--rs-short-window",
+                str(cfg["rs_short_window"]),
+                "--rs-mid-window",
+                str(cfg["rs_mid_window"]),
+                "--rs-long-window",
+                str(cfg["rs_long_window"]),
+                "--trend-ema-window",
+                str(cfg["trend_ema_window"]),
+                "--breakout-window",
+                str(cfg["breakout_window"]),
+                "--atr-window",
+                str(cfg["atr_window"]),
+                "--atr-mult",
+                str(cfg["atr_mult"]),
+                "--volume-window",
+                str(cfg["volume_window"]),
+                "--volume-threshold",
+                str(cfg["volume_threshold"]),
+                "--entry-score",
+                str(cfg["entry_score"]),
+                "--exit-score",
+                str(cfg["exit_score"]),
             ]
         )
     else:

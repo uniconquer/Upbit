@@ -7,6 +7,7 @@ from src.risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_f
 from src.strategy import (
     backtest_signal_frame,
     build_research_trend_signals,
+    build_relative_strength_rotation_signals,
     extract_backtest_trade_events,
     parameter_grid_size,
     rsi_signals,
@@ -73,6 +74,34 @@ def test_backtest_signal_frame_runs_on_research_trend():
     result = backtest_signal_frame(frame)
     assert isinstance(result["trades"], int)
     assert "total_return_pct" in result
+
+
+def test_relative_strength_rotation_frame_contains_expected_columns():
+    frame = build_relative_strength_rotation_signals(
+        _sample_ohlcv(),
+        rs_short_window=4,
+        rs_mid_window=8,
+        rs_long_window=12,
+        trend_ema_window=10,
+        breakout_window=6,
+        atr_window=5,
+        volume_window=6,
+        entry_score=1.0,
+        exit_score=-1.0,
+    )
+    expected = {
+        "rs_short",
+        "rs_mid",
+        "rs_long",
+        "trend_ema",
+        "atr_stop",
+        "strategy_score",
+        "buy_signal",
+        "sell_signal",
+    }
+    assert expected.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
 
 
 def test_backtest_slippage_reduces_return():

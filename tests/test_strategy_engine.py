@@ -93,6 +93,29 @@ def test_build_strategy_frame_flux_uses_indicator():
     assert frame["buy_signal"].dtype == bool
 
 
+def test_build_strategy_frame_relative_strength_rotation_uses_shared_builder():
+    frame = build_strategy_frame(
+        _sample_ohlcv(),
+        strategy_name="relative_strength_rotation",
+        params={
+            "rs_short_window": 2,
+            "rs_mid_window": 3,
+            "rs_long_window": 5,
+            "trend_ema_window": 4,
+            "breakout_window": 3,
+            "atr_window": 3,
+            "atr_mult": 1.8,
+            "volume_window": 3,
+            "entry_score": 0.5,
+            "exit_score": -0.5,
+        },
+    )
+
+    assert {"rs_short", "rs_mid", "rs_long", "trend_ema", "atr_stop", "strategy_score"}.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+
+
 def test_build_strategy_frame_flux_ema_filter_uses_combo_signals():
     frame = build_strategy_frame(
         _sample_ohlcv(),
@@ -137,6 +160,24 @@ def test_sweep_strategy_parameters_supports_flux():
     assert {"ltf_len", "ltf_mult", "htf_rule", "total_return_pct", "buy_signals", "sell_signals"}.issubset(results.columns)
 
 
+def test_sweep_strategy_parameters_supports_relative_strength_rotation():
+    results = sweep_strategy_parameters(
+        _sample_ohlcv(),
+        strategy_name="relative_strength_rotation",
+        candidate_grid={
+            "rs_short_window": [2, 3],
+            "rs_mid_window": [4],
+            "rs_long_window": [6],
+            "trend_ema_window": [4],
+            "breakout_window": [3],
+            "entry_score": [0.5, 1.0],
+        },
+    )
+
+    assert len(results) == 4
+    assert {"rs_short_window", "trend_ema_window", "entry_score", "total_return_pct"}.issubset(results.columns)
+
+
 def test_sweep_strategy_parameters_supports_flux_ema_filter():
     results = sweep_strategy_parameters(
         _sample_ohlcv(),
@@ -163,6 +204,18 @@ def test_compare_strategy_backtests_ranks_multiple_strategies():
     results = compare_strategy_backtests(
         _sample_ohlcv(),
         strategies=[
+            {
+                "strategy_name": "relative_strength_rotation",
+                "params": {
+                    "rs_short_window": 2,
+                    "rs_mid_window": 3,
+                    "rs_long_window": 5,
+                    "trend_ema_window": 4,
+                    "breakout_window": 3,
+                    "entry_score": 0.5,
+                    "exit_score": -0.5,
+                },
+            },
             {"strategy_name": "flux_trend", "params": {"ltf_len": 14, "ltf_mult": 1.5, "htf_len": 20, "htf_mult": 2.0, "htf_rule": "60T"}},
             {
                 "strategy_name": "flux_ema_filter",
@@ -183,6 +236,6 @@ def test_compare_strategy_backtests_ranks_multiple_strategies():
         flux_indicator_with_ema=_fake_flux_indicator_with_ema,
     )
 
-    assert len(results) == 2
+    assert len(results) == 3
     assert {"strategy_name", "strategy_label", "params", "return_pct", "max_drawdown_pct", "last_signal"}.issubset(results.columns)
-    assert set(results["strategy_name"]) == {"flux_trend", "flux_ema_filter"}
+    assert set(results["strategy_name"]) == {"relative_strength_rotation", "flux_trend", "flux_ema_filter"}

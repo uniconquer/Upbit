@@ -148,6 +148,20 @@ def _strategy_params_from_args(args) -> dict[str, Any]:
             "volume_window": args.volume_window,
             "volume_threshold": args.volume_threshold,
         }
+    if args.strategy == "relative_strength_rotation":
+        return {
+            "rs_short_window": args.rs_short_window,
+            "rs_mid_window": args.rs_mid_window,
+            "rs_long_window": args.rs_long_window,
+            "trend_ema_window": args.trend_ema_window,
+            "breakout_window": args.breakout_window,
+            "atr_window": args.atr_window,
+            "atr_mult": args.atr_mult,
+            "volume_window": args.volume_window,
+            "volume_threshold": args.volume_threshold,
+            "entry_score": args.entry_score,
+            "exit_score": args.exit_score,
+        }
     if args.strategy == "flux_trend":
         return {
             "ltf_len": args.ltf_len,
@@ -794,7 +808,11 @@ class MRMonitor:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Strategy monitor for Upbit")
-    parser.add_argument("--strategy", choices=["research_trend", "flux_trend", "flux_ema_filter"], default="research_trend")
+    parser.add_argument(
+        "--strategy",
+        choices=["research_trend", "relative_strength_rotation", "flux_trend", "flux_ema_filter"],
+        default="research_trend",
+    )
     parser.add_argument("--interval", default="minute30")
     parser.add_argument("--count", type=int, default=240, help="Candles fetched per market")
     parser.add_argument("--markets", type=int, default=20, help="Top N markets by 24h turnover")
@@ -832,6 +850,12 @@ def parse_args():
     parser.add_argument("--momentum-window", type=int, default=20)
     parser.add_argument("--volume-window", type=int, default=20)
     parser.add_argument("--volume-threshold", type=float, default=0.9)
+    parser.add_argument("--rs-short-window", type=int, default=10)
+    parser.add_argument("--rs-mid-window", type=int, default=30)
+    parser.add_argument("--rs-long-window", type=int, default=90)
+    parser.add_argument("--trend-ema-window", type=int, default=55)
+    parser.add_argument("--entry-score", type=float, default=8.0)
+    parser.add_argument("--exit-score", type=float, default=2.0)
 
     parser.add_argument("--ltf-len", type=int, default=20)
     parser.add_argument("--ltf-mult", type=float, default=2.0)

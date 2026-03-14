@@ -70,10 +70,16 @@ LIVE_PARAM_WIDGETS = {
     "strategy_name": "live_strategy_name",
     "fast_ema": "live_fast_ema",
     "slow_ema": "live_slow_ema",
+    "rs_short_window": "live_rs_short_window",
+    "rs_mid_window": "live_rs_mid_window",
+    "rs_long_window": "live_rs_long_window",
+    "trend_ema_window": "live_trend_ema_window",
     "breakout_window": "live_breakout",
     "exit_window": "live_exit",
     "atr_window": "live_atr_window",
     "atr_mult": "live_atr_mult",
+    "entry_score": "live_entry_score",
+    "exit_score": "live_exit_score",
     "adx_window": "live_adx_window",
     "adx_threshold": "live_adx_threshold",
     "momentum_window": "live_momentum",
@@ -127,6 +133,15 @@ _SERIES_LABELS = {
     "flux_buy_signal": "원본 플럭스 매수",
     "flux_sell_signal": "원본 플럭스 매도",
 }
+
+_SERIES_LABELS.update(
+    {
+        "rs_short": "단기 상대강도",
+        "rs_mid": "중기 상대강도",
+        "rs_long": "장기 상대강도",
+        "volume_ratio": "거래량 비율",
+    }
+)
 
 
 def _signal_text(signal: str | None) -> str:
@@ -558,10 +573,16 @@ def _managed_worker_config_from_live_params(params: dict) -> dict:
     for field in [
         "fast_ema",
         "slow_ema",
+        "rs_short_window",
+        "rs_mid_window",
+        "rs_long_window",
+        "trend_ema_window",
         "breakout_window",
         "exit_window",
         "atr_window",
         "atr_mult",
+        "entry_score",
+        "exit_score",
         "adx_window",
         "adx_threshold",
         "momentum_window",
@@ -1320,6 +1341,22 @@ def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
             params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1, key=f"{prefix}_momentum")
             params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1, key=f"{prefix}_volume_window")
             params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key=f"{prefix}_volume_threshold")
+    elif strategy_name == "relative_strength_rotation":
+        with st.expander("상대강도 로테이션 설정", expanded=False):
+            row1 = st.columns(4)
+            params["rs_short_window"] = row1[0].number_input("단기 상대강도 창", 3, 80, 10, 1, key=f"{prefix}_rs_short_window")
+            params["rs_mid_window"] = row1[1].number_input("중기 상대강도 창", 5, 160, 30, 1, key=f"{prefix}_rs_mid_window")
+            params["rs_long_window"] = row1[2].number_input("장기 상대강도 창", 10, 320, 90, 1, key=f"{prefix}_rs_long_window")
+            params["trend_ema_window"] = row1[3].number_input("추세 EMA 길이", 10, 240, 55, 1, key=f"{prefix}_trend_ema_window")
+            row2 = st.columns(4)
+            params["breakout_window"] = row2[0].number_input("돌파 창", 5, 120, 20, 1, key=f"{prefix}_breakout")
+            params["atr_window"] = row2[1].number_input("ATR 창", 5, 50, 14, 1, key=f"{prefix}_atr_window")
+            params["atr_mult"] = row2[2].number_input("ATR 배수", 1.0, 6.0, 2.2, 0.1, key=f"{prefix}_atr_mult")
+            params["volume_window"] = row2[3].number_input("거래량 창", 5, 80, 20, 1, key=f"{prefix}_volume_window")
+            row3 = st.columns(3)
+            params["volume_threshold"] = row3[0].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key=f"{prefix}_volume_threshold")
+            params["entry_score"] = row3[1].number_input("진입 점수", -20.0, 40.0, 8.0, 0.5, key=f"{prefix}_entry_score")
+            params["exit_score"] = row3[2].number_input("청산 점수", -20.0, 40.0, 2.0, 0.5, key=f"{prefix}_exit_score")
     elif strategy_name == "flux_trend":
         with st.expander("플럭스 추세 밴드 설정", expanded=False):
             row = st.columns(5)
@@ -1357,8 +1394,9 @@ def _render_chart(
     position: dict[str, object] | None = None,
 ):
     is_research = strategy_name == "research_trend"
-    rows = 4 if is_research else 3
-    row_heights = [0.56, 0.16, 0.14, 0.14] if is_research else [0.64, 0.18, 0.18]
+    is_rotation = strategy_name == "relative_strength_rotation"
+    rows = 4 if (is_research or is_rotation) else 3
+    row_heights = [0.56, 0.16, 0.14, 0.14] if (is_research or is_rotation) else [0.64, 0.18, 0.18]
     figure = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=row_heights, vertical_spacing=0.03)
     figure.add_trace(
         go.Candlestick(
@@ -1404,6 +1442,30 @@ def _render_chart(
         if "strategy_score" in frame:
             figure.add_trace(
                 go.Scatter(x=frame.index, y=frame["strategy_score"], name=_SERIES_LABELS["strategy_score"], line={"color": "#2dd4bf"}),
+                row=4,
+                col=1,
+            )
+    elif is_rotation:
+        for column, color in [
+            ("trend_ema", "#fde047"),
+            ("atr_stop", "#fb7185"),
+            ("breakout_high", "rgba(45, 212, 191, 0.40)"),
+        ]:
+            if column in frame:
+                figure.add_trace(
+                    go.Scatter(
+                        x=frame.index,
+                        y=frame[column],
+                        name=_SERIES_LABELS.get(column, column),
+                        line={"width": 1.2, "color": color},
+                    ),
+                    row=1,
+                    col=1,
+                )
+        figure.add_trace(go.Bar(x=frame.index, y=frame["volume"], name="거래량", marker_color="rgba(96,165,250,0.5)"), row=3, col=1)
+        if "strategy_score" in frame:
+            figure.add_trace(
+                go.Scatter(x=frame.index, y=frame["strategy_score"], name=_SERIES_LABELS.get("strategy_score", "전략 점수"), line={"color": "#2dd4bf"}),
                 row=4,
                 col=1,
             )
@@ -1493,7 +1555,7 @@ def _render_chart(
         figure.update_yaxes(title_text="점수", row=4, col=1)
     else:
         figure.update_yaxes(title_text="거래량", row=3, col=1)
-    return apply_chart_theme(figure, height=920 if is_research else 860)
+    return apply_chart_theme(figure, height=920 if (is_research or is_rotation) else 860)
 
 
 def render_live():

@@ -240,6 +240,67 @@ def build_research_trend_signals(
     return df
 
 
+def build_relative_strength_rotation_signals(
+    raw: pd.DataFrame,
+    *,
+    rs_short_window: int = 10,
+    rs_mid_window: int = 30,
+    rs_long_window: int = 90,
+    trend_ema_window: int = 55,
+    breakout_window: int = 20,
+    atr_window: int = 14,
+    atr_mult: float = 2.2,
+    volume_window: int = 20,
+    volume_threshold: float = 0.9,
+    entry_score: float = 8.0,
+    exit_score: float = 2.0,
+) -> pd.DataFrame:
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(raw.columns):
+        missing = ", ".join(sorted(required - set(raw.columns)))
+        raise ValueError(f"raw data missing columns: {missing}")
+
+    df = raw.copy()
+    close = df["close"].astype(float)
+    df["rs_short"] = close.pct_change(rs_short_window) * 100.0
+    df["rs_mid"] = close.pct_change(rs_mid_window) * 100.0
+    df["rs_long"] = close.pct_change(rs_long_window) * 100.0
+    df["trend_ema"] = ema(close, trend_ema_window)
+    df["atr"] = average_true_range(df, atr_window)
+    df["breakout_high"] = df["high"].rolling(breakout_window).max().shift(1)
+    df["volume_ratio"] = df["volume"] / df["volume"].rolling(volume_window).mean().replace(0.0, np.nan)
+    df["volatility"] = close.pct_change().rolling(max(5, rs_short_window)).std() * 100.0
+
+    trend_gap = ((close / df["trend_ema"]) - 1.0) * 100.0
+    ema_slope = df["trend_ema"].pct_change(max(2, rs_short_window // 2)) * 100.0
+    df["atr_stop"] = df["trend_ema"] - (atr_mult * df["atr"])
+    df["strategy_score"] = (
+        df["rs_short"].fillna(0.0) * 0.45
+        + df["rs_mid"].fillna(0.0) * 0.35
+        + df["rs_long"].fillna(0.0) * 0.20
+        + trend_gap.fillna(0.0) * 1.40
+        + ema_slope.fillna(0.0) * 0.80
+        + (df["volume_ratio"].fillna(1.0) - 1.0) * 6.0
+        - df["volatility"].fillna(0.0) * 6.0
+    )
+
+    slope_window = max(2, rs_short_window // 2)
+    regime_ok = (close > df["trend_ema"]) & (df["trend_ema"] > df["trend_ema"].shift(slope_window))
+    breakout = close > df["breakout_high"]
+    volume_ok = df["volume_ratio"].fillna(1.0) >= volume_threshold
+    score_ok = df["strategy_score"] >= entry_score
+    score_rising = df["strategy_score"] > df["strategy_score"].shift(1)
+    raw_buy = regime_ok & breakout & volume_ok & score_ok & score_rising
+
+    score_fade = df["strategy_score"] <= exit_score
+    trend_fail = close < df["trend_ema"]
+    raw_sell = score_fade | trend_fail | (close < df["atr_stop"])
+
+    df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
+    df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
 def backtest_signal_frame(
     df: pd.DataFrame,
     *,

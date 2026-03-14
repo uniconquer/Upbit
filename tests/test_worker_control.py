@@ -51,6 +51,34 @@ def test_build_worker_command_includes_live_and_strategy_args():
     assert "11" in command
 
 
+def test_build_worker_command_includes_relative_strength_args():
+    command = build_worker_command(
+        {
+            "strategy": "relative_strength_rotation",
+            "rs_short_window": 8,
+            "rs_mid_window": 24,
+            "rs_long_window": 72,
+            "trend_ema_window": 55,
+            "entry_score": 7.5,
+            "exit_score": 1.5,
+        }
+    )
+
+    assert "relative_strength_rotation" in command
+    assert "--rs-short-window" in command
+    assert "8" in command
+    assert "--rs-mid-window" in command
+    assert "24" in command
+    assert "--rs-long-window" in command
+    assert "72" in command
+    assert "--trend-ema-window" in command
+    assert "55" in command
+    assert "--entry-score" in command
+    assert "7.5" in command
+    assert "--exit-score" in command
+    assert "1.5" in command
+
+
 def test_build_worker_command_includes_flux_ema_filter_args():
     command = build_worker_command(
         {
