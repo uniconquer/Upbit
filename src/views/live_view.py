@@ -471,6 +471,50 @@ def _restore_live_widget_state(params: dict) -> None:
             st.session_state.setdefault(widget_key, params["risk_limits"][field])
 
 
+def _serialize_live_result_table(result: object) -> list[dict[str, object]]:
+    if not isinstance(result, dict):
+        return []
+    table = result.get("table")
+    if not isinstance(table, pd.DataFrame) or table.empty:
+        return []
+    sanitized = table.where(pd.notna(table), None)
+    return sanitized.to_dict("records")
+
+
+def _restore_live_result_table(rows: object) -> bool:
+    if not isinstance(rows, list) or not rows:
+        return False
+    try:
+        table = pd.DataFrame(rows)
+    except Exception:
+        return False
+    if table.empty:
+        return False
+    st.session_state.setdefault("LIVE_RESULTS", {"table": table, "detail": {}})
+    return True
+
+
+def _resolve_live_scan_action(
+    *,
+    working: bool,
+    changed: bool,
+    has_results: bool,
+    skip_cached_scan_once: bool,
+    refresh_requested: bool,
+) -> str:
+    if working:
+        return "none"
+    if refresh_requested:
+        return "scan"
+    if changed or not has_results:
+        if skip_cached_scan_once and has_results:
+            return "show_cached"
+        return "scan"
+    if skip_cached_scan_once and has_results:
+        return "show_cached"
+    return "none"
+
+
 def _hydrate_live_runtime() -> None:
     if st.session_state.get("LIVE_RUNTIME_HYDRATED"):
         return
@@ -488,6 +532,8 @@ def _hydrate_live_runtime() -> None:
         saved_last_report_day = str(snapshot.get("last_daily_report_day") or "").strip()
         st.session_state.setdefault("LIVE_LAST_DAILY_REPORT_DAY", saved_last_report_day or None)
         st.session_state.setdefault("LIVE_LAST_RUN", snapshot.get("last_run"))
+        if _restore_live_result_table(snapshot.get("result_table")):
+            st.session_state.setdefault("LIVE_SKIP_AUTOSCAN_ONCE", True)
     st.session_state["LIVE_RUNTIME_HYDRATED"] = True
 
 
@@ -518,6 +564,7 @@ def _persist_live_runtime(
             "daily_reports": daily_reports,
             "last_daily_report_day": last_daily_report_day,
             "last_run": last_run,
+            "result_table": _serialize_live_result_table(st.session_state.get("LIVE_RESULTS")),
         },
     )
 
@@ -1762,20 +1809,23 @@ def render_live():
             if st.session_state.get("LIVE_STARTUP_NOTICE"):
                 st.info(str(st.session_state["LIVE_STARTUP_NOTICE"]))
 
-    worker_cols = st.columns([1, 1, 1, 1.4])
+    worker_cols = st.columns([1.15, 0.95, 0.95, 0.95, 1.4])
     worker_interval = int(worker_cols[0].number_input("페이지 워커 주기(초)", 5, 3600, 30, 1, key="live_worker_interval"))
     params["worker_interval"] = worker_interval
     changed = params != (st.session_state.get("LIVE_PARAMS") or {})
     st.session_state["LIVE_PARAMS"] = dict(params)
-    start = worker_cols[1].button("페이지 워커 시작", use_container_width=True)
-    stop = worker_cols[2].button("페이지 워커 중지", use_container_width=True)
-    worker_cols[3].markdown(f"**모드:** {_mode_text('LIVE' if live_trading else 'SIM')} / **전략:** `{strategy_label(strategy_name)}`")
-
     if "LIVE_WORKER" not in st.session_state:
         st.session_state["LIVE_WORKER"] = _Worker()
     worker: _Worker = st.session_state["LIVE_WORKER"]
+    working_now = bool(st.session_state.get("LIVE_WORKING"))
+    refresh = worker_cols[1].button("지금 새로고침", use_container_width=True, disabled=working_now)
+    start = worker_cols[2].button("페이지 워커 시작", use_container_width=True, disabled=working_now)
+    stop = worker_cols[3].button("페이지 워커 중지", use_container_width=True, disabled=not working_now)
+    worker_cols[4].markdown(f"**모드:** {_mode_text('LIVE' if live_trading else 'SIM')} / **전략:** `{strategy_label(strategy_name)}`")
     if start:
         st.session_state["LIVE_WORKING"] = True
+        st.session_state.pop("LIVE_REFRESH_NOTICE", None)
+        st.session_state["LIVE_SKIP_AUTOSCAN_ONCE"] = False
         worker.start(
             worker_interval,
             params,
@@ -1796,8 +1846,22 @@ def render_live():
         worker.stop()
     if changed and auto and st.session_state.get("LIVE_WORKING"):
         worker.update_params(params)
-    if (not st.session_state.get("LIVE_WORKING")) and (changed or "LIVE_RESULTS" not in st.session_state):
+    live_scan_action = _resolve_live_scan_action(
+        working=bool(st.session_state.get("LIVE_WORKING")),
+        changed=changed,
+        has_results="LIVE_RESULTS" in st.session_state,
+        skip_cached_scan_once=bool(st.session_state.get("LIVE_SKIP_AUTOSCAN_ONCE")),
+        refresh_requested=refresh,
+    )
+    if live_scan_action == "show_cached":
+        st.session_state["LIVE_SKIP_AUTOSCAN_ONCE"] = False
+        st.session_state["LIVE_REFRESH_NOTICE"] = "마지막 저장 스냅샷을 먼저 표시하고 있습니다. '지금 새로고침'을 누르면 최신 스캔과 상세 차트를 불러옵니다."
+    elif live_scan_action == "scan":
+        st.session_state["LIVE_SKIP_AUTOSCAN_ONCE"] = False
+        st.session_state.pop("LIVE_REFRESH_NOTICE", None)
         _scan(params)
+    if st.session_state.get("LIVE_REFRESH_NOTICE"):
+        st.info(str(st.session_state["LIVE_REFRESH_NOTICE"]))
     if st.session_state.get("LIVE_WORKING"):
         snapshot = worker.get_snapshot()
         if snapshot:
@@ -1845,6 +1909,8 @@ def render_live():
                 ),
                 use_container_width=True,
             )
+        else:
+            st.info("현재는 마지막 저장 스냅샷의 요약만 복원된 상태입니다. '지금 새로고침'을 누르면 최신 상세 차트와 신호를 다시 불러옵니다.")
     else:
         st.info("라이브 데스크를 한 번 실행하면 상위 종목 표가 생성됩니다.")
 

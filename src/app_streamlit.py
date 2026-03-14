@@ -61,9 +61,11 @@ with st.sidebar:
     st.markdown(f"**UPBIT_LIVE:** `{live_flag}`")
 
 
-if view == "account":
-    render_account()
-elif view == "backtest":
-    render_backtest()
-else:
-    render_live()
+main_slot = st.empty()
+with main_slot.container():
+    if view == "account":
+        render_account()
+    elif view == "backtest":
+        render_backtest()
+    else:
+        render_live()
