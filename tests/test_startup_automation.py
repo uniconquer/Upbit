@@ -4,11 +4,14 @@ import json
 import subprocess
 
 from src.startup_automation import (
+    build_startup_file_contents,
     build_install_command,
     build_remove_command,
     build_startup_task_action,
     format_startup_status_bundle,
+    install_startup_task,
     load_startup_task_status,
+    startup_file_path,
     task_full_name,
 )
 
@@ -27,14 +30,27 @@ def test_build_install_and_remove_commands_use_expected_task_name():
     remove_command = build_remove_command("telegram")
 
     assert install_command[:4] == ["schtasks", "/Create", "/F", "/SC"]
+    assert "ONSTART" in install_command
+    assert "/RU" in install_command
+    assert "SYSTEM" in install_command
+    assert "/RL" in install_command
+    assert "HIGHEST" in install_command
     assert "/TN" in install_command
     assert task_full_name("telegram") in install_command
     assert install_command[-2:] == ["/DELAY", "0000:25"]
     assert remove_command == ["schtasks", "/Delete", "/TN", task_full_name("telegram"), "/F"]
 
 
+def test_build_startup_file_contents_contains_hidden_powershell():
+    content = build_startup_file_contents("worker", python_executable=r"C:\Python\python.exe")
+
+    assert content.startswith("@echo off")
+    assert "powershell.exe" in content
+    assert "worker-start" in content
+
+
 def test_load_startup_task_status_parses_powershell_json():
-    def fake_runner(args, check=False, capture_output=True, text=True):
+    def fake_runner(args, check=False, capture_output=True, text=True, **kwargs):
         assert args[0] == "powershell.exe"
         payload = {
             "component": "worker",
@@ -59,6 +75,69 @@ def test_load_startup_task_status_parses_powershell_json():
     assert snapshot["state"] == "Ready"
     assert snapshot["last_run_time"] > 0
     assert snapshot["next_run_time"] > snapshot["last_run_time"]
+    assert snapshot["method"] == "scheduled-task"
+
+
+def test_load_startup_task_status_falls_back_to_startup_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    path = startup_file_path("worker")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(build_startup_file_contents("worker"), encoding="utf-8")
+
+    def fake_runner(args, check=False, capture_output=True, text=True, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="ERROR: Access is denied.")
+
+    snapshot = load_startup_task_status("worker", runner=fake_runner)
+
+    assert snapshot["exists"] is True
+    assert snapshot["configured"] is True
+    assert snapshot["method"] == "startup-folder"
+    assert snapshot["state"] == "StartupFolder"
+
+
+def test_install_startup_task_falls_back_to_startup_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+
+    def fake_runner(args, check=False, capture_output=True, text=True, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="ERROR: Access is denied.")
+
+    snapshot = install_startup_task("telegram", runner=fake_runner)
+
+    assert snapshot["ok"] is True
+    assert snapshot["exists"] is True
+    assert snapshot["method"] == "startup-folder"
+    assert startup_file_path("telegram").exists()
+
+
+def test_install_startup_task_removes_startup_folder_on_scheduled_task_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    path = startup_file_path("worker")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(build_startup_file_contents("worker"), encoding="utf-8")
+
+    def fake_runner(args, check=False, capture_output=True, text=True, **kwargs):
+        if args[0] == "schtasks":
+            return subprocess.CompletedProcess(args, 0, stdout="SUCCESS", stderr="")
+        payload = {
+            "component": "worker",
+            "exists": True,
+            "task_name": "ManagedWorker",
+            "task_path": r"\Upbit\\",
+            "state": "Ready",
+            "enabled": True,
+            "execute": "powershell.exe",
+            "arguments": "-NoProfile -Command worker-start",
+            "last_run_time": 0.0,
+            "next_run_time": 0.0,
+            "last_task_result": 0,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    snapshot = install_startup_task("worker", runner=fake_runner)
+
+    assert snapshot["ok"] is True
+    assert snapshot["method"] == "scheduled-task"
+    assert not path.exists()
 
 
 def test_format_startup_status_bundle_renders_korean_summary():

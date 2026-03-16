@@ -42,6 +42,7 @@ try:
         start_message,
     )
     from paper_trader import PaperTrader
+    from power_keepawake import SystemAwakeGuard
     from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
     from runtime_store import load_runtime_state, save_runtime_state
     from strategy import backtest_signal_frame
@@ -78,6 +79,7 @@ except ImportError:
         start_message,
     )
     from src.paper_trader import PaperTrader
+    from src.power_keepawake import SystemAwakeGuard
     from src.risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
     from src.runtime_store import load_runtime_state, save_runtime_state
     from src.strategy import backtest_signal_frame
@@ -308,6 +310,7 @@ class MRMonitor:
         self._order_event_tracker = OrderEventTracker()
         self._my_order_thread: threading.Thread | None = None
         self._my_order_stop_event = threading.Event()
+        self._awake_guard = SystemAwakeGuard(enabled=True)
         self._hydrate_state()
 
     def _mode_label(self) -> str:
@@ -983,6 +986,7 @@ class MRMonitor:
         }
 
     def loop(self, markets: list[str], *, loop_seconds: int = 120, cycles: int = 0) -> None:
+        self._awake_guard.acquire()
         self._notify(
             start_message(
                 self._mode_label(),
@@ -1007,6 +1011,7 @@ class MRMonitor:
                 time.sleep(loop_seconds)
         finally:
             self._stop_my_order_stream()
+            self._awake_guard.release()
 
 
 def parse_args():

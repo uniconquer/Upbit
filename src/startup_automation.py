@@ -44,6 +44,13 @@ def _main_script() -> Path:
     return _repo_root() / "src" / "main.py"
 
 
+def _startup_folder() -> Path:
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    return Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
 def _task_spec(component: str) -> dict[str, str]:
     key = str(component or "").strip().lower()
     if key not in STARTUP_TASKS:
@@ -54,6 +61,11 @@ def _task_spec(component: str) -> dict[str, str]:
 def task_full_name(component: str) -> str:
     spec = _task_spec(component)
     return f"{STARTUP_TASK_PATH}{spec['task_name']}"
+
+
+def startup_file_path(component: str) -> Path:
+    spec = _task_spec(component)
+    return _startup_folder() / f"Upbit-{spec['task_name']}.cmd"
 
 
 def _powershell_quote(value: str) -> str:
@@ -84,6 +96,10 @@ def build_startup_task_action(component: str, *, python_executable: str | None =
     )
 
 
+def build_startup_file_contents(component: str, *, python_executable: str | None = None) -> str:
+    return f"@echo off\r\n{build_startup_task_action(component, python_executable=python_executable)}\r\n"
+
+
 def build_install_command(
     component: str,
     *,
@@ -96,9 +112,11 @@ def build_install_command(
         "/Create",
         "/F",
         "/SC",
-        "ONLOGON",
+        "ONSTART",
+        "/RU",
+        "SYSTEM",
         "/RL",
-        "LIMITED",
+        "HIGHEST",
         "/TN",
         task_full_name(component),
         "/TR",
@@ -119,7 +137,14 @@ def build_run_command(component: str) -> list[str]:
 
 
 def _run_subprocess(command: list[str], *, runner=subprocess.run) -> subprocess.CompletedProcess[str]:
-    return runner(command, check=False, capture_output=True, text=True)
+    return runner(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def _powershell_query_script(component: str) -> str:
@@ -198,6 +223,40 @@ def _format_kst_timestamp(value: Any) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S KST")
 
 
+def _startup_file_status(component: str) -> dict[str, Any]:
+    spec = _task_spec(component)
+    path = startup_file_path(component)
+    exists = path.exists()
+    arguments = ""
+    if exists:
+        try:
+            arguments = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            arguments = ""
+    return {
+        "component": component,
+        "label": spec["label"],
+        "task_name": spec["task_name"],
+        "task_path": str(path.parent),
+        "exists": exists,
+        "enabled": exists,
+        "state": "StartupFolder" if exists else "없음",
+        "description": spec["description"],
+        "execute": str(path) if exists else "",
+        "arguments": arguments,
+        "working_directory": str(_repo_root()) if exists else "",
+        "user_id": os.getenv("USERNAME") or "",
+        "logon_type": "InteractiveToken" if exists else "",
+        "run_level": "Limited" if exists else "",
+        "trigger_type": "StartupFolder" if exists else "",
+        "trigger_delay": "",
+        "last_run_time": 0.0,
+        "next_run_time": 0.0,
+        "last_task_result": None,
+        "method": "startup-folder" if exists else "",
+    }
+
+
 def _normalized_status(component: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
     spec = _task_spec(component)
     raw = dict(payload or {})
@@ -224,6 +283,7 @@ def _normalized_status(component: str, payload: Mapping[str, Any] | None = None)
         "next_run_time": _parse_ps_datetime(raw.get("next_run_time")),
         "last_task_result": raw.get("last_task_result"),
         "configured": expected_fragment in arguments,
+        "method": str(raw.get("method") or ("scheduled-task" if raw.get("exists") else "")),
     }
 
 
@@ -235,10 +295,12 @@ def load_startup_task_status(component: str, *, runner=subprocess.run) -> dict[s
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     payload = _parse_ps_json(process.stdout)
     if not payload:
-        return _normalized_status(component, {"exists": False})
+        return _normalized_status(component, _startup_file_status(component))
     return _normalized_status(component, payload)
 
 
@@ -251,10 +313,19 @@ def install_startup_task(component: str, *, delay: str | None = None, runner=sub
     if not startup_supported():
         return _normalized_status(component, {"exists": False, "state": "unsupported", "ok": False})
     process = _run_subprocess(build_install_command(component, delay=delay), runner=runner)
-    snapshot = load_startup_task_status(component, runner=runner)
+    if process.returncode == 0:
+        path = startup_file_path(component)
+        if path.exists():
+            path.unlink()
+        snapshot = load_startup_task_status(component, runner=runner)
+    else:
+        path = startup_file_path(component)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(build_startup_file_contents(component), encoding="utf-8")
+        snapshot = _normalized_status(component, _startup_file_status(component))
     snapshot.update(
         {
-            "ok": process.returncode == 0,
+            "ok": process.returncode == 0 or bool(snapshot.get("exists")),
             "stdout": str(process.stdout or "").strip(),
             "stderr": str(process.stderr or "").strip(),
         }
@@ -266,10 +337,15 @@ def remove_startup_task(component: str, *, runner=subprocess.run) -> dict[str, A
     if not startup_supported():
         return _normalized_status(component, {"exists": False, "state": "unsupported", "ok": False})
     process = _run_subprocess(build_remove_command(component), runner=runner)
+    file_path = startup_file_path(component)
+    removed_file = False
+    if file_path.exists():
+        file_path.unlink()
+        removed_file = True
     snapshot = load_startup_task_status(component, runner=runner)
     snapshot.update(
         {
-            "ok": process.returncode == 0,
+            "ok": process.returncode == 0 or removed_file or not snapshot.get("exists"),
             "stdout": str(process.stdout or "").strip(),
             "stderr": str(process.stderr or "").strip(),
         }
@@ -280,6 +356,19 @@ def remove_startup_task(component: str, *, runner=subprocess.run) -> dict[str, A
 def run_startup_task(component: str, *, runner=subprocess.run) -> dict[str, Any]:
     if not startup_supported():
         return _normalized_status(component, {"exists": False, "state": "unsupported", "ok": False})
+    snapshot = load_startup_task_status(component, runner=runner)
+    if snapshot.get("method") == "startup-folder":
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        process = subprocess.Popen(
+            build_startup_task_action(component),
+            cwd=str(_repo_root()),
+            shell=True,
+            creationflags=creationflags,
+        )
+        snapshot.update({"ok": True, "stdout": "", "stderr": "", "pid": process.pid})
+        return snapshot
     process = _run_subprocess(build_run_command(component), runner=runner)
     snapshot = load_startup_task_status(component, runner=runner)
     snapshot.update(
