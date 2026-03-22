@@ -8,6 +8,7 @@ from src.strategy import (
     backtest_signal_frame,
     build_research_trend_signals,
     build_relative_strength_rotation_signals,
+    build_rsi_bb_double_bottom_signals,
     extract_backtest_trade_events,
     parameter_grid_size,
     rsi_signals,
@@ -33,6 +34,27 @@ def _sample_ohlcv() -> pd.DataFrame:
         }
     )
     frame.index = pd.date_range("2026-01-01", periods=len(frame), freq="4h")
+    return frame
+
+
+def _double_bottom_ohlcv() -> pd.DataFrame:
+    closes = [
+        120, 119, 118, 117, 116, 115, 114, 113, 112, 111,
+        109, 107, 105, 103, 101, 99, 97, 95, 93, 91,
+        89, 87, 86, 88, 92, 95, 93, 91, 90, 92,
+        95, 98, 101, 105, 109, 113, 117, 121, 125, 129,
+    ]
+    opens = [121] + closes[:-1]
+    frame = pd.DataFrame(
+        {
+            "open": opens,
+            "high": [max(o, c) + 1 for o, c in zip(opens, closes)],
+            "low": [min(o, c) - 1 for o, c in zip(opens, closes)],
+            "close": closes,
+            "volume": [1000 + (idx * 25) for idx, _ in enumerate(closes)],
+        }
+    )
+    frame.index = pd.date_range("2026-02-01", periods=len(frame), freq="1h")
     return frame
 
 
@@ -102,6 +124,42 @@ def test_relative_strength_rotation_frame_contains_expected_columns():
     assert expected.issubset(frame.columns)
     assert frame["buy_signal"].dtype == bool
     assert frame["sell_signal"].dtype == bool
+
+
+def test_rsi_bb_double_bottom_frame_contains_expected_columns_and_cycle():
+    frame = build_rsi_bb_double_bottom_signals(
+        _double_bottom_ohlcv(),
+        oversold=35.0,
+        bb_mult=1.5,
+        max_setup_bars=15,
+        confirm_bars=8,
+        use_macd_filter=False,
+    )
+    expected = {
+        "rsi",
+        "bb_basis",
+        "bb_upper",
+        "bb_lower",
+        "macd_line",
+        "macd_signal",
+        "rebound_marker",
+        "second_bottom_marker",
+        "trade_stop",
+        "take_profit",
+        "strategy_score",
+        "buy_signal",
+        "sell_signal",
+    }
+    assert expected.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+    assert int(frame["buy_signal"].sum()) == 1
+    assert int(frame["sell_signal"].sum()) == 1
+    buy_index = frame.index[frame["buy_signal"]][0]
+    sell_index = frame.index[frame["sell_signal"]][0]
+    assert buy_index < sell_index
+    assert frame.loc[buy_index, "trade_stop"] < frame.loc[buy_index, "close"]
+    assert frame.loc[buy_index, "take_profit"] > frame.loc[buy_index, "close"]
 
 
 def test_backtest_slippage_reduces_return():

@@ -198,6 +198,21 @@ def _strategy_params_from_args(args) -> dict[str, Any]:
             "volume_window": args.volume_window,
             "volume_threshold": args.volume_threshold,
         }
+    if args.strategy == "rsi_bb_double_bottom":
+        return {
+            "rsi_len": args.rsi_len,
+            "oversold": args.oversold,
+            "bb_len": args.bb_len,
+            "bb_mult": args.bb_mult,
+            "min_down_bars": args.min_down_bars,
+            "low_tolerance_pct": args.low_tolerance_pct,
+            "max_setup_bars": args.max_setup_bars,
+            "confirm_bars": args.confirm_bars,
+            "use_macd_filter": not args.no_macd_filter,
+            "macd_lookback": args.macd_lookback,
+            "risk_reward": args.risk_reward,
+            "stop_buffer_ticks": args.stop_buffer_ticks,
+        }
     if args.strategy == "relative_strength_rotation":
         return {
             "rs_short_window": args.rs_short_window,
@@ -1018,7 +1033,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Strategy monitor for Upbit")
     parser.add_argument(
         "--strategy",
-        choices=["research_trend", "relative_strength_rotation", "flux_trend", "flux_ema_filter"],
+        choices=["research_trend", "rsi_bb_double_bottom", "relative_strength_rotation", "flux_trend", "flux_ema_filter"],
         default="research_trend",
     )
     parser.add_argument("--interval", default="minute30")
@@ -1060,6 +1075,18 @@ def parse_args():
     parser.add_argument("--momentum-window", type=int, default=20)
     parser.add_argument("--volume-window", type=int, default=20)
     parser.add_argument("--volume-threshold", type=float, default=0.9)
+    parser.add_argument("--rsi-len", type=int, default=14)
+    parser.add_argument("--oversold", type=float, default=30.0)
+    parser.add_argument("--bb-len", type=int, default=20)
+    parser.add_argument("--bb-mult", type=float, default=2.0)
+    parser.add_argument("--min-down-bars", type=int, default=2)
+    parser.add_argument("--low-tolerance-pct", type=float, default=1.0)
+    parser.add_argument("--max-setup-bars", type=int, default=12)
+    parser.add_argument("--confirm-bars", type=int, default=4)
+    parser.add_argument("--no-macd-filter", action="store_true", default=False)
+    parser.add_argument("--macd-lookback", type=int, default=5)
+    parser.add_argument("--risk-reward", type=float, default=2.0)
+    parser.add_argument("--stop-buffer-ticks", type=int, default=2)
     parser.add_argument("--rs-short-window", type=int, default=10)
     parser.add_argument("--rs-mid-window", type=int, default=30)
     parser.add_argument("--rs-long-window", type=int, default=90)

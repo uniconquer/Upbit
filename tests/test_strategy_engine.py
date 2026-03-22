@@ -116,6 +116,42 @@ def test_build_strategy_frame_relative_strength_rotation_uses_shared_builder():
     assert frame["sell_signal"].dtype == bool
 
 
+def test_build_strategy_frame_rsi_bb_double_bottom_uses_shared_builder():
+    closes = [
+        120, 119, 118, 117, 116, 115, 114, 113, 112, 111,
+        109, 107, 105, 103, 101, 99, 97, 95, 93, 91,
+        89, 87, 86, 88, 92, 95, 93, 91, 90, 92,
+        95, 98, 101, 105, 109, 113, 117, 121, 125, 129,
+    ]
+    frame = pd.DataFrame(
+        {
+            "open": [121] + closes[:-1],
+            "high": [value + 1.5 for value in closes],
+            "low": [value - 1.5 for value in closes],
+            "close": closes,
+            "volume": [1000 + idx * 20 for idx, _ in enumerate(closes)],
+        },
+        index=pd.date_range("2026-02-01", periods=len(closes), freq="1h"),
+    )
+
+    result = build_strategy_frame(
+        frame,
+        strategy_name="rsi_bb_double_bottom",
+        params={
+            "oversold": 35.0,
+            "bb_mult": 1.5,
+            "max_setup_bars": 15,
+            "confirm_bars": 8,
+            "use_macd_filter": False,
+        },
+    )
+
+    assert {"rsi", "bb_lower", "trade_stop", "take_profit", "rebound_marker", "second_bottom_marker"}.issubset(result.columns)
+    assert result["buy_signal"].dtype == bool
+    assert result["sell_signal"].dtype == bool
+    assert int(result["buy_signal"].sum()) >= 1
+
+
 def test_build_strategy_frame_flux_ema_filter_uses_combo_signals():
     frame = build_strategy_frame(
         _sample_ohlcv(),
@@ -176,6 +212,40 @@ def test_sweep_strategy_parameters_supports_relative_strength_rotation():
 
     assert len(results) == 4
     assert {"rs_short_window", "trend_ema_window", "entry_score", "total_return_pct"}.issubset(results.columns)
+
+
+def test_sweep_strategy_parameters_supports_rsi_bb_double_bottom():
+    closes = [
+        120, 119, 118, 117, 116, 115, 114, 113, 112, 111,
+        109, 107, 105, 103, 101, 99, 97, 95, 93, 91,
+        89, 87, 86, 88, 92, 95, 93, 91, 90, 92,
+        95, 98, 101, 105, 109, 113, 117, 121, 125, 129,
+    ]
+    frame = pd.DataFrame(
+        {
+            "open": [121] + closes[:-1],
+            "high": [value + 1.5 for value in closes],
+            "low": [value - 1.5 for value in closes],
+            "close": closes,
+            "volume": [1000 + idx * 20 for idx, _ in enumerate(closes)],
+        },
+        index=pd.date_range("2026-02-01", periods=len(closes), freq="1h"),
+    )
+
+    results = sweep_strategy_parameters(
+        frame,
+        strategy_name="rsi_bb_double_bottom",
+        base_params={"use_macd_filter": False, "max_setup_bars": 15, "confirm_bars": 8},
+        candidate_grid={
+            "rsi_len": [12, 14],
+            "oversold": [30.0, 35.0],
+            "bb_len": [20],
+            "bb_mult": [1.5],
+        },
+    )
+
+    assert len(results) == 4
+    assert {"rsi_len", "oversold", "bb_len", "bb_mult", "total_return_pct", "buy_signals", "sell_signals"}.issubset(results.columns)
 
 
 def test_sweep_strategy_parameters_supports_flux_ema_filter():

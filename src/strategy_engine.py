@@ -10,35 +10,39 @@ import pandas as pd
 try:
     from strategy import (
         backtest_signal_frame,
-        build_research_trend_signals,
         build_relative_strength_rotation_signals,
+        build_research_trend_signals,
+        build_rsi_bb_double_bottom_signals,
     )
 except ImportError:
     from src.strategy import (
         backtest_signal_frame,
-        build_research_trend_signals,
         build_relative_strength_rotation_signals,
+        build_research_trend_signals,
+        build_rsi_bb_double_bottom_signals,
     )
 
 FluxCallable = Callable[..., pd.DataFrame] | None
 
 STRATEGY_LABELS = {
     "research_trend": "연구형 추세 돌파",
+    "rsi_bb_double_bottom": "RSI+BB 더블바텀 롱",
     "relative_strength_rotation": "상대강도 로테이션",
     "flux_trend": "플럭스 추세 밴드",
     "flux_ema_filter": "플럭스 + EMA 필터",
 }
 
 STRATEGY_DESCRIPTIONS = {
-    "research_trend": "EMA 정배열, 거래량 동반 돌파, ADX 추세 강도, ATR 이탈 손절을 함께 보는 추세 전략입니다.",
-    "relative_strength_rotation": "여러 기간 수익률과 추세 강도를 합친 점수로 강한 종목만 따라가는 회전형 모멘텀 전략입니다.",
-    "flux_trend": "다중 시간대 볼린저 밴드와 칼만 기준선을 함께 보는 반전·재진입형 전략입니다.",
-    "flux_ema_filter": "플럭스 신호 뒤에 EMA·ATR 확인이 일정 캔들 안에 따라올 때만 진입하는 확인형 추세-반전 혼합 전략입니다.",
+    "research_trend": "EMA 정배열, 돌파, ADX 추세 강도, ATR 이탈 손절을 함께 보는 추세 전략입니다.",
+    "rsi_bb_double_bottom": "RSI 과매도와 볼린저 하단 세척 이후 첫 반등과 두 번째 바닥을 확인한 뒤 진입하는 반등 전략입니다.",
+    "relative_strength_rotation": "여러 기간 수익률과 추세 강도를 합친 점수로 강한 종목을 따라가는 회전형 모멘텀 전략입니다.",
+    "flux_trend": "다중 시간대 밴드와 중심선 변화를 함께 보는 반전형 밴드 전략입니다.",
+    "flux_ema_filter": "플럭스 신호 뒤에 EMA와 ATR 확인을 추가한 혼합형 추세-반전 전략입니다.",
 }
 
 
 def strategy_options(flux_available: bool, flux_ema_available: bool = False) -> list[str]:
-    options = ["research_trend", "relative_strength_rotation"]
+    options = ["research_trend", "rsi_bb_double_bottom", "relative_strength_rotation"]
     if flux_available:
         options.append("flux_trend")
     if flux_ema_available:
@@ -116,6 +120,23 @@ def build_strategy_frame(
             momentum_window=int(params.get("momentum_window", 20)),
             volume_window=int(params.get("volume_window", 20)),
             volume_threshold=float(params.get("volume_threshold", 0.9)),
+        )
+
+    if strategy_name == "rsi_bb_double_bottom":
+        return build_rsi_bb_double_bottom_signals(
+            raw,
+            rsi_len=int(params.get("rsi_len", 14)),
+            oversold=float(params.get("oversold", 30.0)),
+            bb_len=int(params.get("bb_len", 20)),
+            bb_mult=float(params.get("bb_mult", 2.0)),
+            min_down_bars=int(params.get("min_down_bars", 2)),
+            low_tolerance_pct=float(params.get("low_tolerance_pct", 1.0)),
+            max_setup_bars=int(params.get("max_setup_bars", 12)),
+            confirm_bars=int(params.get("confirm_bars", 4)),
+            use_macd_filter=_as_bool(params.get("use_macd_filter"), True),
+            macd_lookback=int(params.get("macd_lookback", 5)),
+            risk_reward=float(params.get("risk_reward", 2.0)),
+            stop_buffer_ticks=int(params.get("stop_buffer_ticks", 2)),
         )
 
     if strategy_name == "relative_strength_rotation":

@@ -71,6 +71,18 @@ LIVE_PARAM_WIDGETS = {
     "strategy_name": "live_strategy_name",
     "fast_ema": "live_fast_ema",
     "slow_ema": "live_slow_ema",
+    "rsi_len": "live_rsi_len",
+    "oversold": "live_oversold",
+    "bb_len": "live_bb_len",
+    "bb_mult": "live_bb_mult",
+    "min_down_bars": "live_min_down_bars",
+    "low_tolerance_pct": "live_low_tolerance_pct",
+    "max_setup_bars": "live_max_setup_bars",
+    "confirm_bars": "live_confirm_bars",
+    "use_macd_filter": "live_use_macd_filter",
+    "macd_lookback": "live_macd_lookback",
+    "risk_reward": "live_risk_reward",
+    "stop_buffer_ticks": "live_stop_buffer_ticks",
     "rs_short_window": "live_rs_short_window",
     "rs_mid_window": "live_rs_mid_window",
     "rs_long_window": "live_rs_long_window",
@@ -133,6 +145,14 @@ _SERIES_LABELS = {
     "strength": "EMA 필터 강도",
     "flux_buy_signal": "원본 플럭스 매수",
     "flux_sell_signal": "원본 플럭스 매도",
+    "rsi": "RSI",
+    "bb_basis": "볼린저 기준선",
+    "bb_upper": "볼린저 상단",
+    "bb_lower": "볼린저 하단",
+    "macd_line": "MACD",
+    "macd_signal": "MACD 시그널",
+    "trade_stop": "전략 손절선",
+    "take_profit": "전략 익절선",
 }
 
 _SERIES_LABELS.update(
@@ -660,6 +680,18 @@ def _managed_worker_config_from_live_params(params: dict) -> dict:
     for field in [
         "fast_ema",
         "slow_ema",
+        "rsi_len",
+        "oversold",
+        "bb_len",
+        "bb_mult",
+        "min_down_bars",
+        "low_tolerance_pct",
+        "max_setup_bars",
+        "confirm_bars",
+        "use_macd_filter",
+        "macd_lookback",
+        "risk_reward",
+        "stop_buffer_ticks",
         "rs_short_window",
         "rs_mid_window",
         "rs_long_window",
@@ -1488,6 +1520,23 @@ def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
             params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1, key=f"{prefix}_momentum")
             params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1, key=f"{prefix}_volume_window")
             params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key=f"{prefix}_volume_threshold")
+    elif strategy_name == "rsi_bb_double_bottom":
+        with st.expander("RSI+BB 더블바텀 롱 설정", expanded=False):
+            row1 = st.columns(4)
+            params["rsi_len"] = row1[0].number_input("RSI 길이", 2, 50, 14, 1, key=f"{prefix}_rsi_len")
+            params["oversold"] = row1[1].number_input("과매도 기준", 5.0, 50.0, 30.0, 0.5, key=f"{prefix}_oversold")
+            params["bb_len"] = row1[2].number_input("BB 길이", 5, 80, 20, 1, key=f"{prefix}_bb_len")
+            params["bb_mult"] = row1[3].number_input("BB 배수", 0.5, 5.0, 2.0, 0.1, key=f"{prefix}_bb_mult")
+            row2 = st.columns(4)
+            params["min_down_bars"] = row2[0].number_input("연속 하락봉 수", 1, 10, 2, 1, key=f"{prefix}_min_down_bars")
+            params["low_tolerance_pct"] = row2[1].number_input("두 번째 바닥 허용치 (%)", 0.0, 5.0, 1.0, 0.1, key=f"{prefix}_low_tolerance_pct")
+            params["max_setup_bars"] = row2[2].number_input("셋업 유지 바 수", 3, 40, 12, 1, key=f"{prefix}_max_setup_bars")
+            params["confirm_bars"] = row2[3].number_input("확인 대기 바 수", 1, 20, 4, 1, key=f"{prefix}_confirm_bars")
+            row3 = st.columns(4)
+            params["use_macd_filter"] = row3[0].checkbox("MACD 확인 사용", value=True, key=f"{prefix}_use_macd_filter")
+            params["macd_lookback"] = row3[1].number_input("MACD 최근 교차 바 수", 1, 20, 5, 1, key=f"{prefix}_macd_lookback")
+            params["risk_reward"] = row3[2].number_input("손익비", 0.5, 5.0, 2.0, 0.25, key=f"{prefix}_risk_reward")
+            params["stop_buffer_ticks"] = row3[3].number_input("스탑 버퍼 틱", 0, 20, 2, 1, key=f"{prefix}_stop_buffer_ticks")
     elif strategy_name == "relative_strength_rotation":
         with st.expander("상대강도 로테이션 설정", expanded=False):
             row1 = st.columns(4)
@@ -1541,9 +1590,10 @@ def _render_chart(
     position: dict[str, object] | None = None,
 ):
     is_research = strategy_name == "research_trend"
+    is_double_bottom = strategy_name == "rsi_bb_double_bottom"
     is_rotation = strategy_name == "relative_strength_rotation"
-    rows = 4 if (is_research or is_rotation) else 3
-    row_heights = [0.56, 0.16, 0.14, 0.14] if (is_research or is_rotation) else [0.64, 0.18, 0.18]
+    rows = 4 if (is_research or is_rotation or is_double_bottom) else 3
+    row_heights = [0.56, 0.16, 0.14, 0.14] if (is_research or is_rotation or is_double_bottom) else [0.64, 0.18, 0.18]
     figure = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=row_heights, vertical_spacing=0.03)
     figure.add_trace(
         go.Candlestick(
@@ -1589,6 +1639,44 @@ def _render_chart(
         if "strategy_score" in frame:
             figure.add_trace(
                 go.Scatter(x=frame.index, y=frame["strategy_score"], name=_SERIES_LABELS["strategy_score"], line={"color": "#2dd4bf"}),
+                row=4,
+                col=1,
+            )
+    elif is_double_bottom:
+        for column, color in [
+            ("bb_basis", "#f8fafc"),
+            ("bb_upper", "rgba(96, 165, 250, 0.60)"),
+            ("bb_lower", "rgba(248, 113, 113, 0.65)"),
+            ("trade_stop", "#fb7185"),
+            ("take_profit", "#22c55e"),
+        ]:
+            if column in frame:
+                figure.add_trace(
+                    go.Scatter(
+                        x=frame.index,
+                        y=frame[column],
+                        name=_SERIES_LABELS.get(column, column),
+                        line={"color": color, "width": 1.5},
+                    ),
+                    row=1,
+                    col=1,
+                )
+        if "rsi" in frame:
+            figure.add_trace(
+                go.Scatter(x=frame.index, y=frame["rsi"], name=_SERIES_LABELS.get("rsi", "RSI"), line={"color": "#a78bfa"}),
+                row=3,
+                col=1,
+            )
+            figure.add_hline(y=30, line={"color": "rgba(255,255,255,0.16)", "dash": "dot"}, row=3, col=1)
+        if "macd_line" in frame:
+            figure.add_trace(
+                go.Scatter(x=frame.index, y=frame["macd_line"], name=_SERIES_LABELS.get("macd_line", "MACD"), line={"color": "#2dd4bf"}),
+                row=4,
+                col=1,
+            )
+        if "macd_signal" in frame:
+            figure.add_trace(
+                go.Scatter(x=frame.index, y=frame["macd_signal"], name=_SERIES_LABELS.get("macd_signal", "MACD Signal"), line={"color": "#f59e0b"}),
                 row=4,
                 col=1,
             )
@@ -1660,6 +1748,26 @@ def _render_chart(
                     col=1,
                 )
 
+    for column, color, symbol, label in [
+        ("rebound_marker", "#38bdf8", "circle-open", "첫 반등"),
+        ("second_bottom_marker", "#f59e0b", "circle", "두 번째 바닥"),
+    ]:
+        if column in frame:
+            hits = frame[frame[column]]
+            if not hits.empty:
+                figure.add_trace(
+                    go.Scatter(
+                        x=hits.index,
+                        y=hits["low"] * 0.995,
+                        mode="markers",
+                        name=label,
+                        marker={"symbol": symbol, "size": 11, "color": color, "line": {"color": "white", "width": 1.2}},
+                        hovertemplate="%{x}<br>가격=%{y:.0f}<extra></extra>",
+                    ),
+                    row=1,
+                    col=1,
+                )
+
     if market and trade_log:
         actual_events = _trade_events_for_market(trade_log, market)
         for side, color, label in [
@@ -1700,9 +1808,15 @@ def _render_chart(
     if is_research:
         figure.update_yaxes(title_text="ADX", row=3, col=1)
         figure.update_yaxes(title_text="점수", row=4, col=1)
+    elif is_double_bottom:
+        figure.update_yaxes(title_text="RSI", row=3, col=1)
+        figure.update_yaxes(title_text="MACD", row=4, col=1)
+    elif is_rotation:
+        figure.update_yaxes(title_text="거래량", row=3, col=1)
+        figure.update_yaxes(title_text="점수", row=4, col=1)
     else:
         figure.update_yaxes(title_text="거래량", row=3, col=1)
-    return apply_chart_theme(figure, height=920 if (is_research or is_rotation) else 860)
+    return apply_chart_theme(figure, height=920 if (is_research or is_rotation or is_double_bottom) else 860)
 
 
 def render_live():

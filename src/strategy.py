@@ -141,6 +141,52 @@ def rsi_signals(
     return signals
 
 
+def relative_strength_index(prices: Sequence[float] | pd.Series, period: int = 14) -> pd.Series:
+    if period <= 1:
+        raise ValueError("period > 1 required")
+    series = _as_float_series(prices)
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def bollinger_bands(
+    prices: Sequence[float] | pd.Series,
+    window: int = 20,
+    std_mult: float = 2.0,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    if window <= 1:
+        raise ValueError("window > 1 required")
+    series = _as_float_series(prices)
+    basis = series.rolling(window).mean()
+    deviation = series.rolling(window).std(ddof=0)
+    upper = basis + (deviation * std_mult)
+    lower = basis - (deviation * std_mult)
+    return basis, upper, lower
+
+
+def moving_average_convergence_divergence(
+    prices: Sequence[float] | pd.Series,
+    *,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    if min(fast, slow, signal) <= 0 or fast >= slow:
+        raise ValueError("require 0 < fast < slow and signal > 0")
+    series = _as_float_series(prices)
+    fast_line = ema(series, fast)
+    slow_line = ema(series, slow)
+    macd_line = fast_line - slow_line
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
 def average_true_range(df: pd.DataFrame, window: int = 14) -> pd.Series:
     if window <= 0:
         raise ValueError("window > 0 required")
@@ -298,6 +344,234 @@ def build_relative_strength_rotation_signals(
 
     df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
     df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
+def _infer_price_tick(raw: pd.DataFrame) -> float:
+    values = pd.concat(
+        [
+            raw["open"].astype(float),
+            raw["high"].astype(float),
+            raw["low"].astype(float),
+            raw["close"].astype(float),
+        ],
+        axis=0,
+    ).dropna()
+    if values.empty:
+        return 0.0
+    unique_values = pd.Series(np.sort(values.unique()), dtype=float)
+    diffs = unique_values.diff().abs()
+    positive = diffs[(diffs > 0) & np.isfinite(diffs)]
+    if positive.empty:
+        return 0.0
+    try:
+        return float(positive.quantile(0.05))
+    except Exception:
+        return float(positive.min())
+
+
+def build_rsi_bb_double_bottom_signals(
+    raw: pd.DataFrame,
+    *,
+    rsi_len: int = 14,
+    oversold: float = 30.0,
+    bb_len: int = 20,
+    bb_mult: float = 2.0,
+    min_down_bars: int = 2,
+    low_tolerance_pct: float = 1.0,
+    max_setup_bars: int = 12,
+    confirm_bars: int = 4,
+    use_macd_filter: bool = True,
+    macd_lookback: int = 5,
+    risk_reward: float = 2.0,
+    stop_buffer_ticks: int = 2,
+) -> pd.DataFrame:
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(raw.columns):
+        missing = ", ".join(sorted(required - set(raw.columns)))
+        raise ValueError(f"raw data missing columns: {missing}")
+
+    df = raw.copy()
+    open_ = df["open"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+
+    df["rsi"] = relative_strength_index(close, rsi_len)
+    bb_basis, bb_upper, bb_lower = bollinger_bands(close, bb_len, bb_mult)
+    df["bb_basis"] = bb_basis
+    df["bb_upper"] = bb_upper
+    df["bb_lower"] = bb_lower
+    macd_line, macd_signal, macd_hist = moving_average_convergence_divergence(close)
+    df["macd_line"] = macd_line
+    df["macd_signal"] = macd_signal
+    df["macd_hist"] = macd_hist
+
+    down_count = pd.Series(0, index=df.index, dtype=int)
+    for idx in range(1, len(df)):
+        down_count.iat[idx] = int(down_count.iat[idx - 1]) + 1 if close.iat[idx] < close.iat[idx - 1] else 0
+    df["down_count"] = down_count
+
+    bearish_prev = close.shift(1) < open_.shift(1)
+    df["bullish_engulfing"] = (close > open_) & bearish_prev & (close >= open_.shift(1)) & (open_ <= close.shift(1))
+    df["bullish_confirm"] = (close > open_) & (close > close.shift(1))
+    df["setup_candidate"] = (df["rsi"] <= oversold) & (low <= df["bb_lower"]) & (df["down_count"] >= min_down_bars)
+
+    recent_macd_cross = np.zeros(len(df), dtype=bool)
+    last_cross_index = -10_000
+    for idx in range(1, len(df)):
+        crossed = bool(macd_line.iat[idx] > macd_signal.iat[idx] and macd_line.iat[idx - 1] <= macd_signal.iat[idx - 1])
+        if crossed:
+            last_cross_index = idx
+        recent_macd_cross[idx] = (idx - last_cross_index) <= macd_lookback
+    df["macd_ok"] = (not use_macd_filter) | (
+        (df["macd_line"] > df["macd_signal"]) & pd.Series(recent_macd_cross, index=df.index)
+    )
+
+    rebound_marker = np.zeros(len(df), dtype=bool)
+    second_bottom_marker = np.zeros(len(df), dtype=bool)
+    buy_signal = np.zeros(len(df), dtype=bool)
+    sell_signal = np.zeros(len(df), dtype=bool)
+    setup_state = np.zeros(len(df), dtype=int)
+    trade_stop = np.full(len(df), np.nan, dtype=float)
+    take_profit = np.full(len(df), np.nan, dtype=float)
+
+    tick_size = _infer_price_tick(df)
+    stop_buffer = max(float(stop_buffer_ticks), 0.0) * tick_size
+
+    state = 0
+    stage_start_index = -1
+    first_low = np.nan
+    second_low = np.nan
+
+    in_position = False
+    entry_index = -1
+    active_stop = np.nan
+    active_take_profit = np.nan
+
+    for idx in range(len(df)):
+        if in_position:
+            trade_stop[idx] = active_stop
+            take_profit[idx] = active_take_profit
+            if idx > entry_index:
+                stop_hit = np.isfinite(active_stop) and low.iat[idx] <= active_stop
+                take_profit_hit = np.isfinite(active_take_profit) and high.iat[idx] >= active_take_profit
+                if stop_hit or take_profit_hit:
+                    sell_signal[idx] = True
+                    in_position = False
+                    entry_index = -1
+                    active_stop = np.nan
+                    active_take_profit = np.nan
+                    state = 0
+                    stage_start_index = -1
+                    first_low = np.nan
+                    second_low = np.nan
+                    setup_state[idx] = state
+                    continue
+
+        if idx == 0 or in_position:
+            setup_state[idx] = state
+            continue
+
+        current_low = float(low.iat[idx])
+        lower_band = float(df["bb_lower"].iat[idx]) if pd.notna(df["bb_lower"].iat[idx]) else float("nan")
+        tolerance_low = float(first_low) * (1 - (low_tolerance_pct / 100.0)) if np.isfinite(first_low) else float("nan")
+
+        if state == 0:
+            if bool(df["setup_candidate"].iat[idx]):
+                state = 1
+                stage_start_index = idx
+                first_low = current_low
+                second_low = np.nan
+
+        elif state == 1:
+            first_low = min(float(first_low), current_low) if np.isfinite(first_low) else current_low
+            if bool(df["bullish_engulfing"].iat[idx]):
+                state = 2
+                stage_start_index = idx
+                rebound_marker[idx] = True
+            elif (idx - stage_start_index) > max_setup_bars:
+                state = 0
+                stage_start_index = -1
+                first_low = np.nan
+                second_low = np.nan
+
+        elif state == 2:
+            invalid_break = (
+                np.isfinite(tolerance_low)
+                and pd.notna(lower_band)
+                and current_low < tolerance_low
+                and current_low < lower_band
+            )
+            second_bottom = (
+                idx > 0
+                and pd.notna(lower_band)
+                and np.isfinite(tolerance_low)
+                and (close.iat[idx] < close.iat[idx - 1] or current_low < low.iat[idx - 1])
+                and current_low >= lower_band
+                and current_low >= tolerance_low
+            )
+            if invalid_break:
+                state = 0
+                stage_start_index = -1
+                first_low = np.nan
+                second_low = np.nan
+            elif second_bottom:
+                state = 3
+                stage_start_index = idx
+                second_low = current_low
+                second_bottom_marker[idx] = True
+            elif (idx - stage_start_index) > max_setup_bars:
+                state = 0
+                stage_start_index = -1
+                first_low = np.nan
+                second_low = np.nan
+
+        elif state == 3:
+            if pd.notna(lower_band) and current_low >= lower_band:
+                second_low = min(float(second_low), current_low) if np.isfinite(second_low) else current_low
+            invalid_break = pd.notna(lower_band) and np.isfinite(second_low) and current_low < lower_band and current_low < second_low
+            if invalid_break:
+                state = 0
+                stage_start_index = -1
+                first_low = np.nan
+                second_low = np.nan
+            elif bool(df["bullish_confirm"].iat[idx]) and bool(df["macd_ok"].iat[idx]):
+                stop_price = float(second_low) - stop_buffer if np.isfinite(second_low) else np.nan
+                entry_price = float(close.iat[idx])
+                risk = entry_price - stop_price if np.isfinite(stop_price) else 0.0
+                if risk > 0:
+                    active_stop = stop_price
+                    active_take_profit = entry_price + (risk * float(risk_reward))
+                    trade_stop[idx] = active_stop
+                    take_profit[idx] = active_take_profit
+                    buy_signal[idx] = True
+                    in_position = True
+                    entry_index = idx
+                state = 0
+                stage_start_index = -1
+                first_low = np.nan
+                second_low = np.nan
+            elif (idx - stage_start_index) > confirm_bars:
+                state = 0
+                stage_start_index = -1
+                first_low = np.nan
+                second_low = np.nan
+
+        setup_state[idx] = state
+
+    oversold_gap = (oversold - df["rsi"]).clip(lower=0.0).fillna(0.0)
+    bb_gap_pct = (((df["bb_lower"] - close) / close.replace(0.0, np.nan)) * 100.0).clip(lower=0.0).fillna(0.0)
+    macd_gap = (df["macd_line"] - df["macd_signal"]).fillna(0.0)
+    df["strategy_score"] = oversold_gap + (bb_gap_pct * 2.0) + (macd_gap * 10.0)
+
+    df["rebound_marker"] = rebound_marker
+    df["second_bottom_marker"] = second_bottom_marker
+    df["buy_signal"] = buy_signal
+    df["sell_signal"] = sell_signal
+    df["setup_state"] = setup_state
+    df["trade_stop"] = trade_stop
+    df["take_profit"] = take_profit
     return df
 
 
@@ -465,6 +739,7 @@ STRATEGY_HELP = {
     "momentum": "Price versus longer SMA crossover",
     "rsi": "RSI oversold/overbought crossback",
     "research_trend": "EMA trend + breakout + ADX + ATR exit",
+    "rsi_bb_double_bottom": "RSI oversold + Bollinger lower band + second-bottom rebound",
 }
 
 
@@ -475,12 +750,17 @@ __all__ = [
     "average_directional_index",
     "average_true_range",
     "backtest_signal_frame",
+    "bollinger_bands",
+    "build_relative_strength_rotation_signals",
     "build_research_trend_signals",
+    "build_rsi_bb_double_bottom_signals",
     "ema",
     "ema_cross_signals",
     "extract_backtest_trade_events",
+    "moving_average_convergence_divergence",
     "momentum_signals",
     "parameter_grid_size",
+    "relative_strength_index",
     "rsi_signals",
     "sma",
     "sma_cross_signals",

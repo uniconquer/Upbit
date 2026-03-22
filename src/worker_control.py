@@ -131,6 +131,18 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "momentum_window": _to_int(os.getenv("UPBIT_WORKER_MOMENTUM_WINDOW"), 20),
         "volume_window": _to_int(os.getenv("UPBIT_WORKER_VOLUME_WINDOW"), 20),
         "volume_threshold": _to_float(os.getenv("UPBIT_WORKER_VOLUME_THRESHOLD"), 0.9),
+        "rsi_len": _to_int(os.getenv("UPBIT_WORKER_RSI_LEN"), 14),
+        "oversold": _to_float(os.getenv("UPBIT_WORKER_OVERSOLD"), 30.0),
+        "bb_len": _to_int(os.getenv("UPBIT_WORKER_BB_LEN"), 20),
+        "bb_mult": _to_float(os.getenv("UPBIT_WORKER_BB_MULT"), 2.0),
+        "min_down_bars": _to_int(os.getenv("UPBIT_WORKER_MIN_DOWN_BARS"), 2),
+        "low_tolerance_pct": _to_float(os.getenv("UPBIT_WORKER_LOW_TOLERANCE_PCT"), 1.0),
+        "max_setup_bars": _to_int(os.getenv("UPBIT_WORKER_MAX_SETUP_BARS"), 12),
+        "confirm_bars": _to_int(os.getenv("UPBIT_WORKER_CONFIRM_BARS"), 4),
+        "use_macd_filter": _to_bool(os.getenv("UPBIT_WORKER_USE_MACD_FILTER"), True),
+        "macd_lookback": _to_int(os.getenv("UPBIT_WORKER_MACD_LOOKBACK"), 5),
+        "risk_reward": _to_float(os.getenv("UPBIT_WORKER_RISK_REWARD"), 2.0),
+        "stop_buffer_ticks": _to_int(os.getenv("UPBIT_WORKER_STOP_BUFFER_TICKS"), 2),
         "rs_short_window": _to_int(os.getenv("UPBIT_WORKER_RS_SHORT_WINDOW"), 10),
         "rs_mid_window": _to_int(os.getenv("UPBIT_WORKER_RS_MID_WINDOW"), 30),
         "rs_long_window": _to_int(os.getenv("UPBIT_WORKER_RS_LONG_WINDOW"), 90),
@@ -195,6 +207,12 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "adx_window",
         "momentum_window",
         "volume_window",
+        "rsi_len",
+        "bb_len",
+        "min_down_bars",
+        "max_setup_bars",
+        "macd_lookback",
+        "stop_buffer_ticks",
         "rs_short_window",
         "rs_mid_window",
         "rs_long_window",
@@ -213,6 +231,10 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "atr_mult": defaults["atr_mult"],
         "adx_threshold": defaults["adx_threshold"],
         "volume_threshold": defaults["volume_threshold"],
+        "oversold": defaults["oversold"],
+        "bb_mult": defaults["bb_mult"],
+        "low_tolerance_pct": defaults["low_tolerance_pct"],
+        "risk_reward": defaults["risk_reward"],
         "entry_score": defaults["entry_score"],
         "exit_score": defaults["exit_score"],
         "ltf_mult": defaults["ltf_mult"],
@@ -221,6 +243,7 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
     for field, fallback in float_fields.items():
         config[field] = max(_to_float(config.get(field), fallback), 0.0)
     config["htf_rule"] = str(config.get("htf_rule") or defaults["htf_rule"])
+    config["use_macd_filter"] = _to_bool(config.get("use_macd_filter"), defaults["use_macd_filter"])
     config["use_heikin_ashi"] = _to_bool(config.get("use_heikin_ashi"), defaults["use_heikin_ashi"])
     return config
 
@@ -318,6 +341,35 @@ def build_worker_command(config: Mapping[str, Any]) -> list[str]:
                 str(cfg["volume_threshold"]),
             ]
         )
+    elif cfg["strategy"] == "rsi_bb_double_bottom":
+        command.extend(
+            [
+                "--rsi-len",
+                str(cfg["rsi_len"]),
+                "--oversold",
+                str(cfg["oversold"]),
+                "--bb-len",
+                str(cfg["bb_len"]),
+                "--bb-mult",
+                str(cfg["bb_mult"]),
+                "--min-down-bars",
+                str(cfg["min_down_bars"]),
+                "--low-tolerance-pct",
+                str(cfg["low_tolerance_pct"]),
+                "--max-setup-bars",
+                str(cfg["max_setup_bars"]),
+                "--confirm-bars",
+                str(cfg["confirm_bars"]),
+                "--macd-lookback",
+                str(cfg["macd_lookback"]),
+                "--risk-reward",
+                str(cfg["risk_reward"]),
+                "--stop-buffer-ticks",
+                str(cfg["stop_buffer_ticks"]),
+            ]
+        )
+        if not cfg["use_macd_filter"]:
+            command.append("--no-macd-filter")
     elif cfg["strategy"] == "relative_strength_rotation":
         command.extend(
             [
