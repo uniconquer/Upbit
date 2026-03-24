@@ -86,6 +86,35 @@ def _format_kst_timestamp(value: Any) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S KST")
 
 
+def _interval_seconds(value: Any) -> int:
+    raw = str(value or "").strip().lower()
+    if raw == "day":
+        return 86400
+    if raw.startswith("minute"):
+        try:
+            return max(int(raw.removeprefix("minute")), 1) * 60
+        except Exception:
+            return 0
+    return 0
+
+
+def _effective_analysis_interval_seconds(config: Mapping[str, Any]) -> int:
+    configured = _to_int(config.get("analysis_interval_seconds"), 0)
+    if configured > 0:
+        return configured
+    loop_seconds = max(_to_int(config.get("loop_seconds"), 30), 5)
+    candle_seconds = _interval_seconds(config.get("interval"))
+    if candle_seconds <= 0:
+        return max(loop_seconds * 2, 60)
+    return max(loop_seconds, min(max(candle_seconds // 10, 60), 300))
+
+
+def _heartbeat_timeout_seconds(config: Mapping[str, Any]) -> int:
+    loop_seconds = max(_to_int(config.get("loop_seconds"), 30), 5)
+    analysis_seconds = _effective_analysis_interval_seconds(config)
+    return max(loop_seconds * 3, analysis_seconds + max(loop_seconds * 2, 30), 90)
+
+
 def _managed_worker_script() -> Path:
     return Path(__file__).resolve().parent / "mr_worker.py"
 
@@ -104,6 +133,7 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "markets": _to_int(os.getenv("UPBIT_WORKER_MARKETS"), 10),
         "exclude_markets": os.getenv("UPBIT_WORKER_EXCLUDE_MARKETS", ""),
         "loop_seconds": _to_int(os.getenv("UPBIT_WORKER_LOOP_SECONDS"), 30),
+        "analysis_interval_seconds": _to_int(os.getenv("UPBIT_WORKER_ANALYSIS_INTERVAL_SECONDS"), 0),
         "max_open": _to_int(os.getenv("UPBIT_WORKER_MAX_OPEN"), 5),
         "min_fetch_seconds": _to_float(os.getenv("UPBIT_WORKER_MIN_FETCH_SECONDS"), 20.0),
         "per_request_sleep": _to_float(os.getenv("UPBIT_WORKER_PER_REQUEST_SLEEP"), 0.12),
@@ -169,6 +199,10 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
     config["markets"] = max(_to_int(config.get("markets"), defaults["markets"]), 1)
     config["exclude_markets"] = _normalize_market_codes(config.get("exclude_markets"), base=config["base"])
     config["loop_seconds"] = max(_to_int(config.get("loop_seconds"), defaults["loop_seconds"]), 5)
+    config["analysis_interval_seconds"] = max(
+        _to_int(config.get("analysis_interval_seconds"), defaults["analysis_interval_seconds"]),
+        0,
+    )
     config["max_open"] = max(_to_int(config.get("max_open"), defaults["max_open"]), 1)
     config["min_fetch_seconds"] = max(_to_float(config.get("min_fetch_seconds"), defaults["min_fetch_seconds"]), 0.0)
     config["per_request_sleep"] = max(_to_float(config.get("per_request_sleep"), defaults["per_request_sleep"]), 0.0)
@@ -281,6 +315,8 @@ def build_worker_command(config: Mapping[str, Any]) -> list[str]:
         str(cfg["markets"]),
         "--loop-seconds",
         str(cfg["loop_seconds"]),
+        "--analysis-interval-seconds",
+        str(cfg["analysis_interval_seconds"]),
         "--max-open",
         str(cfg["max_open"]),
         "--min-fetch-seconds",
@@ -579,9 +615,16 @@ def load_managed_worker_status() -> dict[str, Any]:
     pending_orders = dict(runtime.get("pending_orders") or {})
     effective_mode = "LIVE" if bool(config.get("live_orders")) and os.getenv("UPBIT_LIVE") == "1" else "SIM"
     kill_switch = effective_kill_switch(str(config.get("kill_switch_name") or "trade-kill-switch"))
+    last_saved_at = float(runtime.get("saved_at") or 0.0)
+    heartbeat_timeout_seconds = _heartbeat_timeout_seconds(config)
+    heartbeat_age_seconds = max(time.time() - last_saved_at, 0.0) if last_saved_at > 0 else None
+    heartbeat_stale = bool(process_state.get("running")) and (
+        heartbeat_age_seconds is None or heartbeat_age_seconds > heartbeat_timeout_seconds
+    )
+    status = "stale" if heartbeat_stale else str(process_state.get("status") or "stopped")
     return {
         "running": bool(process_state.get("running")),
-        "status": str(process_state.get("status") or "stopped"),
+        "status": status,
         "pid": process_state.get("pid"),
         "mode": effective_mode,
         "requested_live_orders": bool(config.get("live_orders")),
@@ -590,7 +633,11 @@ def load_managed_worker_status() -> dict[str, Any]:
         "positions_count": len(positions),
         "pending_orders_count": len(pending_orders),
         "trade_count": len(runtime.get("trade_log") or []),
-        "last_saved_at": float(runtime.get("saved_at") or 0.0),
+        "last_saved_at": last_saved_at,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "heartbeat_timeout_seconds": heartbeat_timeout_seconds,
+        "heartbeat_stale": heartbeat_stale,
+        "analysis_interval_seconds": _effective_analysis_interval_seconds(config),
         "last_daily_report_day": runtime.get("last_daily_report_day"),
         "kill_switch": kill_switch,
         "log_path": str(process_state.get("log_path") or managed_worker_log_path(str(config["state_name"]))),
@@ -601,15 +648,24 @@ def format_worker_status(snapshot: Mapping[str, Any]) -> str:
     config = dict(snapshot.get("config") or {})
     metrics = dict(snapshot.get("metrics") or {})
     kill_switch = dict(snapshot.get("kill_switch") or {})
-    running_label = "실행 중" if snapshot.get("running") else "중지됨"
+    if snapshot.get("heartbeat_stale"):
+        running_label = "응답 지연"
+    else:
+        running_label = "실행 중" if snapshot.get("running") else "중지됨"
     kill_label = "ON" if kill_switch.get("enabled") else "OFF"
+    heartbeat_age_seconds = snapshot.get("heartbeat_age_seconds")
+    if heartbeat_age_seconds is None:
+        heartbeat_label = "-"
+    else:
+        heartbeat_label = f"{int(float(heartbeat_age_seconds))}초 전"
     lines = [
         "[CLI 워커] 상태",
         f"- 실행: {running_label}",
         f"- 모드: {snapshot.get('mode')}",
         f"- 전략: {strategy_label(str(config.get('strategy') or 'research_trend'))} / 마켓 {int(config.get('markets') or 0)}개 / 루프 {int(config.get('loop_seconds') or 0)}초",
+        f"- 전략 재분석: {int(snapshot.get('analysis_interval_seconds') or 0)}초 / heartbeat 기준 {int(snapshot.get('heartbeat_timeout_seconds') or 0)}초",
         f"- 보유 포지션: {int(snapshot.get('positions_count') or 0)}개 / 미체결: {int(snapshot.get('pending_orders_count') or 0)}건 / 트레이드 로그: {int(snapshot.get('trade_count') or 0)}건",
-        f"- 일일 손익: {float(metrics.get('total_pnl') or 0.0):+.0f} KRW / 마지막 저장: {_format_kst_timestamp(snapshot.get('last_saved_at'))}",
+        f"- 일일 손익: {float(metrics.get('total_pnl') or 0.0):+.0f} KRW / 마지막 저장: {_format_kst_timestamp(snapshot.get('last_saved_at'))} / heartbeat: {heartbeat_label}",
         f"- 긴급중지: {kill_label}",
     ]
     reason = str(kill_switch.get("reason") or "").strip()

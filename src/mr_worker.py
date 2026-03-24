@@ -104,6 +104,18 @@ load_dotenv()
 KST = timezone(timedelta(hours=9))
 
 
+def _interval_seconds(value: str) -> int:
+    raw = str(value or "").strip().lower()
+    if raw == "day":
+        return 86400
+    if raw.startswith("minute"):
+        try:
+            return max(int(raw.removeprefix("minute")), 1) * 60
+        except Exception:
+            return 0
+    return 0
+
+
 def normalize_market_codes(values: Any, *, base: str = "KRW") -> list[str]:
     prefix = base.upper() + "-"
     tokens: list[str] = []
@@ -277,6 +289,7 @@ class MRMonitor:
         max_open: int = 5,
         min_fetch_seconds: float = 20.0,
         per_request_sleep: float = 0.12,
+        analysis_interval_seconds: float = 0.0,
         state_name: str | None = None,
         reconcile_timeout_seconds: float = 3.0,
         cost_model: TradingCostModel | None = None,
@@ -297,6 +310,7 @@ class MRMonitor:
         self.max_open = max_open
         self.min_fetch_seconds = min_fetch_seconds
         self.per_request_sleep = per_request_sleep
+        self.analysis_interval_seconds = max(float(analysis_interval_seconds), 0.0)
         self.state_name = state_name
         self.reconcile_timeout_seconds = reconcile_timeout_seconds
         self.cost_model = cost_model or cost_model_from_values()
@@ -315,6 +329,9 @@ class MRMonitor:
         self.daily_reports: dict[str, dict[str, Any]] = {}
         self.last_daily_report_day: str | None = None
         self._last_fetch: dict[str, float] = {}
+        self._last_analysis_at = 0.0
+        self._next_analysis_at = 0.0
+        self._cached_rows: dict[str, dict[str, Any]] = {}
         self._exchange_synced = False
         self._next_exchange_sync_at = 0.0
         self.kill_switch_state = {"enabled": False, "reason": "", "source": "runtime"}
@@ -403,6 +420,9 @@ class MRMonitor:
             "saved_at": time.time(),
             "strategy_name": self.strategy_name,
             "interval": self.interval,
+            "analysis_interval_seconds": self.analysis_interval_seconds,
+            "last_analysis_at": self._last_analysis_at,
+            "next_analysis_at": self._next_analysis_at,
             "metrics": self.metrics,
             "positions": self.trader.to_state(),
             "last_signal_state": self.last_signal_state,
@@ -428,6 +448,9 @@ class MRMonitor:
         self.daily_reports = dict(snapshot.get("daily_reports") or {})
         saved_last_report_day = str(snapshot.get("last_daily_report_day") or "").strip()
         self.last_daily_report_day = saved_last_report_day or None
+        self.analysis_interval_seconds = max(float(snapshot.get("analysis_interval_seconds") or self.analysis_interval_seconds), 0.0)
+        self._last_analysis_at = float(snapshot.get("last_analysis_at") or 0.0)
+        self._next_analysis_at = float(snapshot.get("next_analysis_at") or 0.0)
         self._exchange_synced = bool(snapshot.get("exchange_synced"))
         self._next_exchange_sync_at = float(snapshot.get("next_exchange_sync_at") or 0.0)
 
@@ -779,6 +802,52 @@ class MRMonitor:
         if changed:
             self._save_state()
 
+    def _effective_analysis_interval_seconds(self, loop_seconds: int) -> float:
+        if self.analysis_interval_seconds > 0:
+            return max(self.analysis_interval_seconds, float(loop_seconds))
+        candle_seconds = _interval_seconds(self.interval)
+        if candle_seconds <= 0:
+            return max(float(loop_seconds) * 2.0, 60.0)
+        return max(float(loop_seconds), min(max(candle_seconds / 10.0, 60.0), 300.0))
+
+    def _analysis_due(self, now: float, markets: list[str], loop_seconds: int) -> bool:
+        if not markets:
+            return False
+        if not self._cached_rows:
+            return True
+        tracked_markets = set(markets) | set(self.pending_orders) | set(self.trader.positions)
+        if any(market not in self._cached_rows for market in tracked_markets):
+            return True
+        return now >= self._next_analysis_at
+
+    def _refresh_cached_rows(self, markets: list[str]) -> list[dict[str, Any]]:
+        rows = [dict(self._cached_rows.get(market) or {}) for market in markets if self._cached_rows.get(market)]
+        for market in set(self.pending_orders) | set(self.trader.positions):
+            if market not in self._cached_rows:
+                continue
+            if market not in markets:
+                rows.append(dict(self._cached_rows[market]))
+        refreshed: list[dict[str, Any]] = []
+        for row in rows:
+            market = str(row.get("market") or "")
+            if not market:
+                continue
+            pending = self.pending_orders.get(market)
+            position = self.trader.get_position(market)
+            if pending:
+                side = str(pending.get("side") or "").lower()
+                row["last_signal"] = "BUY_PENDING" if side == "bid" else "SELL_PENDING"
+                row["position"] = "OPEN" if position else "PENDING"
+            else:
+                row["position"] = "OPEN" if position else "-"
+                last_signal = (self.last_signal_state.get(market) or {}).get("sig")
+                if last_signal:
+                    row["last_signal"] = last_signal
+            if market in self.market_prices:
+                row["price"] = float(self.market_prices[market])
+            refreshed.append(row)
+        return refreshed
+
     def _handle_entry(self, market: str, close_price: float, score: float) -> None:
         self._refresh_kill_switch()
         if self._kill_switch_blocks_entry(market):
@@ -898,7 +967,6 @@ class MRMonitor:
         self._apply_sell_fill(market, fill, "signal", partial=False)
 
     def process_market(self, market: str) -> dict[str, Any] | None:
-        self._refresh_metrics()
         frame = self._build_frame(market)
         if frame.empty:
             return None
@@ -960,24 +1028,35 @@ class MRMonitor:
             "position": "OPEN" if updated_position else ("PENDING" if updated_pending else "-"),
         }
 
-    def run_cycle(self, markets: list[str]) -> dict[str, Any]:
+    def run_cycle(self, markets: list[str], *, loop_seconds: int | None = None) -> dict[str, Any]:
+        now = time.time()
         rows: list[dict[str, Any]] = []
         trades_before = len(self.trade_log)
+        effective_loop_seconds = max(int(loop_seconds or 30), 1)
         self._ensure_my_order_stream()
         self._refresh_metrics()
         self._refresh_kill_switch()
         self._process_order_events()
         self._reconcile_pending_orders()
         self._sync_with_exchange()
-        for market in markets:
-            try:
-                row = self.process_market(market)
-                if row:
-                    rows.append(row)
-            except Exception as exc:
-                print(f"process error {market}: {exc}")
-            if self.per_request_sleep > 0:
-                time.sleep(self.per_request_sleep)
+        effective_analysis_interval = self._effective_analysis_interval_seconds(loop_seconds=effective_loop_seconds)
+        analysis_due = self._analysis_due(now, markets, loop_seconds=effective_loop_seconds)
+        if analysis_due:
+            self._cached_rows = {}
+            for market in markets:
+                try:
+                    row = self.process_market(market)
+                    if row:
+                        rows.append(row)
+                        self._cached_rows[market] = dict(row)
+                except Exception as exc:
+                    print(f"process error {market}: {exc}")
+                if self.per_request_sleep > 0:
+                    time.sleep(self.per_request_sleep)
+            self._last_analysis_at = now
+            self._next_analysis_at = now + effective_analysis_interval
+        else:
+            rows = self._refresh_cached_rows(markets)
         self.metrics["unrealized_pnl"] = total_unrealized_pnl(
             self.trader.to_state(),
             self.market_prices,
@@ -991,6 +1070,8 @@ class MRMonitor:
         self._save_state()
         return {
             "processed": len(markets),
+            "analysis_due": analysis_due,
+            "analysis_interval_seconds": effective_analysis_interval,
             "open": len(self.trader.positions),
             "trades": len(self.trade_log),
             "new_trades": len(self.trade_log) - trades_before,
@@ -1002,6 +1083,7 @@ class MRMonitor:
 
     def loop(self, markets: list[str], *, loop_seconds: int = 120, cycles: int = 0) -> None:
         self._awake_guard.acquire()
+        self._next_analysis_at = 0.0
         self._notify(
             start_message(
                 self._mode_label(),
@@ -1015,10 +1097,12 @@ class MRMonitor:
         try:
             while True:
                 cycle_index += 1
-                summary = self.run_cycle(markets)
+                summary = self.run_cycle(markets, loop_seconds=loop_seconds)
                 print(
                     f"[cycle {cycle_index}] processed={summary['processed']} open={summary['open']} "
                     f"pending={summary['pending_orders']} kill={'ON' if summary['kill_switch'] else 'OFF'} "
+                    f"analysis={'scan' if summary['analysis_due'] else 'cache'} "
+                    f"every={summary['analysis_interval_seconds']:.0f}s "
                     f"new_trades={summary['new_trades']} total_pnl={summary['total_pnl']:.0f}"
                 )
                 if cycles and cycle_index >= cycles:
@@ -1041,6 +1125,7 @@ def parse_args():
     parser.add_argument("--markets", type=int, default=20, help="Top N markets by 24h turnover")
     parser.add_argument("--base", default="KRW")
     parser.add_argument("--loop-seconds", type=int, default=120)
+    parser.add_argument("--analysis-interval-seconds", type=int, default=0, help="0 means auto cadence based on interval")
     parser.add_argument("--cycles", type=int, default=0, help="0 means run forever")
     parser.add_argument("--live-orders", action="store_true", default=False, help="Send real orders only when UPBIT_LIVE=1")
     parser.add_argument("--max-open", type=int, default=5)
@@ -1138,6 +1223,7 @@ def main():
         max_open=args.max_open,
         min_fetch_seconds=args.min_fetch_seconds,
         per_request_sleep=args.per_request_sleep,
+        analysis_interval_seconds=args.analysis_interval_seconds,
         state_name=args.state_name,
         reconcile_timeout_seconds=args.reconcile_timeout_seconds,
         cost_model=cost_model_from_values(fee_rate=args.fee, slippage_bps=args.slippage_bps),

@@ -7,7 +7,12 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from src.views.live_view import _filter_ranked_markets, _normalize_market_codes, _resolve_live_scan_action
+from src.views.live_view import (
+    _filter_ranked_markets,
+    _normalize_market_codes,
+    _resolve_execution_guard,
+    _resolve_live_scan_action,
+)
 
 
 def test_live_scan_action_prefers_manual_refresh():
@@ -56,6 +61,20 @@ def test_live_scan_action_does_nothing_while_worker_running():
     )
 
     assert action == "none"
+
+
+def test_execution_guard_prefers_background_worker_for_live_execution():
+    guard = _resolve_execution_guard(
+        page_worker_running=True,
+        managed_worker_running=True,
+        requested_live_trading=True,
+    )
+
+    assert guard["owner"] == "background"
+    assert guard["page_live_trading"] is False
+    assert guard["page_worker_start_disabled"] is True
+    assert guard["background_worker_start_disabled"] is True
+    assert guard["stop_page_worker"] is True
 
 
 def test_normalize_market_codes_adds_krw_prefix_and_dedupes():

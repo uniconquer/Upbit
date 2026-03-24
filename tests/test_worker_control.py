@@ -45,6 +45,7 @@ def test_build_worker_command_includes_live_and_strategy_args():
             "live_orders": True,
             "markets": 8,
             "loop_seconds": 20,
+            "analysis_interval_seconds": 90,
             "fast_ema": 11,
         }
     )
@@ -54,6 +55,8 @@ def test_build_worker_command_includes_live_and_strategy_args():
     assert "research_trend" in command
     assert "--markets" in command
     assert "8" in command
+    assert "--analysis-interval-seconds" in command
+    assert "90" in command
     assert "--fast-ema" in command
     assert "11" in command
 
@@ -146,6 +149,30 @@ def test_load_managed_worker_status_prefers_saved_config_when_stopped(tmp_path, 
     assert status["config"]["exclude_markets"] == ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
 
 
+def test_load_managed_worker_status_marks_stale_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setenv("UPBIT_RUNTIME_DIR", str(tmp_path))
+    save_worker_config({"loop_seconds": 30, "interval": "minute15"})
+    save_runtime_state(
+        "managed-worker-process",
+        {
+            "running": True,
+            "status": "running",
+            "pid": 4321,
+            "config": {"loop_seconds": 30, "interval": "minute15"},
+        },
+    )
+    save_runtime_state("managed-worker", {"saved_at": 1.0, "positions": {}, "pending_orders": {}, "trade_log": []})
+    monkeypatch.setattr("src.worker_control._process_exists", lambda pid: True)
+    monkeypatch.setattr("src.worker_control.time.time", lambda: 600.0)
+
+    status = load_managed_worker_status()
+
+    assert status["running"] is True
+    assert status["status"] == "stale"
+    assert status["heartbeat_stale"] is True
+    assert int(status["analysis_interval_seconds"]) == 90
+
+
 def test_format_worker_status_renders_korean_summary():
     text = format_worker_status(
         {
@@ -155,6 +182,9 @@ def test_format_worker_status_renders_korean_summary():
             "pending_orders_count": 1,
             "trade_count": 4,
             "last_saved_at": 0.0,
+            "heartbeat_age_seconds": 12.0,
+            "heartbeat_timeout_seconds": 90.0,
+            "analysis_interval_seconds": 90.0,
             "pid": 3210,
             "config": {"strategy": "research_trend", "markets": 10, "loop_seconds": 30},
             "metrics": {"total_pnl": 1234.0},

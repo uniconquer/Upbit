@@ -581,6 +581,34 @@ def test_live_monitor_applies_my_order_event_before_polling(monkeypatch):
     assert len(monitor.trade_log) == 1
 
 
+def test_run_cycle_skips_analysis_until_next_interval():
+    api = FakeAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        risk_limits={"max_trade_krw": 10000},
+        max_open=2,
+        min_fetch_seconds=0,
+        per_request_sleep=0,
+        analysis_interval_seconds=120,
+    )
+
+    calls: list[str] = []
+
+    def fake_build_frame(self, market):
+        calls.append(market)
+        return _signal_frame(close=100.0)
+
+    monitor._build_frame = MethodType(fake_build_frame, monitor)
+
+    first = monitor.run_cycle(["KRW-BTC"], loop_seconds=30)
+    second = monitor.run_cycle(["KRW-BTC"], loop_seconds=30)
+
+    assert first["analysis_due"] is True
+    assert second["analysis_due"] is False
+    assert calls == ["KRW-BTC"]
+
+
 def test_kill_switch_blocks_new_entry_but_allows_exit(tmp_path, monkeypatch):
     monkeypatch.setenv("UPBIT_RUNTIME_DIR", str(tmp_path))
     save_kill_switch("trade-kill-switch", enabled=True, reason="테스트")

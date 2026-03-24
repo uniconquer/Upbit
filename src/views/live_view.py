@@ -571,6 +571,22 @@ def _resolve_live_scan_action(
     return "none"
 
 
+def _resolve_execution_guard(
+    *,
+    page_worker_running: bool,
+    managed_worker_running: bool,
+    requested_live_trading: bool,
+) -> dict[str, object]:
+    owner = "background" if managed_worker_running else ("page" if page_worker_running else "idle")
+    return {
+        "owner": owner,
+        "page_live_trading": bool(requested_live_trading and not managed_worker_running),
+        "page_worker_start_disabled": bool(managed_worker_running),
+        "background_worker_start_disabled": bool(page_worker_running),
+        "stop_page_worker": bool(page_worker_running and managed_worker_running),
+    }
+
+
 def _hydrate_live_runtime() -> None:
     if st.session_state.get("LIVE_RUNTIME_HYDRATED"):
         return
@@ -1848,22 +1864,57 @@ def render_live():
     if excluded_markets:
         st.caption(f"제외 중: {', '.join(excluded_markets)}")
     strategy_name, strategy_params = _strategy_controls("live")
+    managed_status = load_managed_worker_status()
 
     with st.expander("실거래 안전장치", expanded=False):
         guard_cols = st.columns([1, 1, 1.2])
         live_toggle = guard_cols[0].checkbox("실거래 주문 허용", value=st.session_state.get("LIVE_TRADING_RAW", False))
         confirm_text = guard_cols[1].text_input("확인 문구 입력 (LIVE)", value=st.session_state.get("LIVE_TRADING_CONFIRM", ""))
         env_live = os.getenv("UPBIT_LIVE") == "1"
-        live_trading = bool(env_live and live_toggle and confirm_text.strip().upper() == "LIVE")
+        requested_live_trading = bool(env_live and live_toggle and confirm_text.strip().upper() == "LIVE")
         st.session_state["LIVE_TRADING_RAW"] = live_toggle
         st.session_state["LIVE_TRADING_CONFIRM"] = confirm_text
-        st.session_state["LIVE_TRADING"] = live_trading
+        st.session_state["LIVE_TRADING_REQUESTED"] = requested_live_trading
         if not env_live:
             st.info("환경변수 잠금이 걸려 있습니다. 실제 주문을 보내려면 `UPBIT_LIVE=1` 이 먼저 필요합니다.")
         elif live_toggle and confirm_text.strip().upper() != "LIVE":
             st.warning("실거래를 활성화하려면 확인 문구에 `LIVE` 를 정확히 입력해야 합니다.")
-        elif live_trading:
+        elif requested_live_trading:
             st.success("실거래 주문 준비가 완료되었습니다.")
+
+    if "LIVE_WORKER" not in st.session_state:
+        st.session_state["LIVE_WORKER"] = _Worker()
+    worker: _Worker = st.session_state["LIVE_WORKER"]
+    execution_guard = _resolve_execution_guard(
+        page_worker_running=bool(st.session_state.get("LIVE_WORKING")),
+        managed_worker_running=bool(managed_status.get("running")),
+        requested_live_trading=bool(st.session_state.get("LIVE_TRADING_REQUESTED")),
+    )
+    if execution_guard["stop_page_worker"] and st.session_state.get("LIVE_WORKING"):
+        st.session_state["LIVE_WORKING"] = False
+        worker.stop()
+        st.session_state["LIVE_OWNER_NOTICE"] = "백그라운드 CLI 워커가 실행 중이라 페이지 워커를 자동으로 중지했습니다."
+    live_trading = bool(execution_guard["page_live_trading"])
+    st.session_state["LIVE_TRADING"] = live_trading
+    if st.session_state.get("LIVE_OWNER_NOTICE"):
+        st.info(str(st.session_state["LIVE_OWNER_NOTICE"]))
+    if managed_status.get("running") and st.session_state.get("LIVE_TRADING_REQUESTED"):
+        st.warning("백그라운드 CLI 워커가 실행 중이라 이 페이지의 주문 경로는 SIM으로 고정됩니다. 실거래 주문은 백그라운드 워커만 담당합니다.")
+
+    owner_label = {
+        "background": "백그라운드 CLI 워커",
+        "page": "페이지 워커",
+        "idle": "대기",
+    }.get(str(execution_guard["owner"]), "대기")
+    background_status_label = "지연" if managed_status.get("heartbeat_stale") else ("실행" if managed_status.get("running") else "중지")
+    heartbeat_age = managed_status.get("heartbeat_age_seconds")
+    heartbeat_text = f"{int(float(heartbeat_age))}초 전" if heartbeat_age is not None else "-"
+    summary_cols = st.columns(5)
+    summary_cols[0].metric("실행 소유권", owner_label)
+    summary_cols[1].metric("페이지 워커", _mode_text("ON" if st.session_state.get("LIVE_WORKING") else "OFF"))
+    summary_cols[2].metric("백그라운드 워커", background_status_label)
+    summary_cols[3].metric("이 페이지 주문", "LIVE" if live_trading else "SIM")
+    summary_cols[4].metric("마지막 heartbeat", heartbeat_text)
 
     kill_state = load_kill_switch(LIVE_KILL_SWITCH_NAME)
     with st.expander("긴급중지", expanded=bool(kill_state.get("enabled"))):
@@ -1935,7 +1986,9 @@ def render_live():
         **strategy_params,
     }
     params["worker_interval"] = int(st.session_state.get("live_worker_interval", 30) or 30)
-    managed_worker_config = _managed_worker_config_from_live_params(params)
+    managed_worker_params = dict(params)
+    managed_worker_params["live_trading"] = bool(st.session_state.get("LIVE_TRADING_REQUESTED"))
+    managed_worker_config = _managed_worker_config_from_live_params(managed_worker_params)
 
     with st.expander("실행 방식 안내", expanded=False):
         st.markdown(
@@ -1957,25 +2010,35 @@ def render_live():
 
     managed_status = load_managed_worker_status()
     with st.expander("백그라운드 CLI 워커 (텔레그램 / 자동화)", expanded=bool(managed_status.get("running"))):
-        status_cols = st.columns(6)
-        status_cols[0].metric("실행중", _mode_text("ON" if managed_status.get("running") else "OFF"))
+        status_cols = st.columns(8)
+        status_cols[0].metric("상태", "지연" if managed_status.get("heartbeat_stale") else _mode_text("ON" if managed_status.get("running") else "OFF"))
         status_cols[1].metric("모드", _mode_text(str(managed_status.get("mode") or "-")))
         status_cols[2].metric("종목 수", int(managed_status.get("config", {}).get("markets") or 0))
         status_cols[3].metric("주기", f"{int(managed_status.get('config', {}).get('loop_seconds') or 0)}초")
         status_cols[4].metric("보유", int(managed_status.get("positions_count") or 0))
         status_cols[5].metric("미체결", int(managed_status.get("pending_orders_count") or 0))
+        status_cols[6].metric("재분석", f"{int(managed_status.get('analysis_interval_seconds') or 0)}초")
+        status_cols[7].metric("heartbeat", heartbeat_text)
 
         action_cols = st.columns([1, 1, 1.5])
-        if action_cols[0].button("백그라운드 워커 시작", use_container_width=True):
+        if action_cols[0].button(
+            "백그라운드 워커 시작",
+            use_container_width=True,
+            disabled=bool(execution_guard["background_worker_start_disabled"]) or bool(managed_status.get("running")),
+        ):
             managed_status = start_managed_worker(managed_worker_config)
             st.session_state["LIVE_BG_NOTICE"] = "백그라운드 CLI 워커를 시작했습니다."
-        if action_cols[1].button("백그라운드 워커 중지", use_container_width=True):
+        if action_cols[1].button("백그라운드 워커 중지", use_container_width=True, disabled=not bool(managed_status.get("running"))):
             managed_status = stop_managed_worker()
             st.session_state["LIVE_BG_NOTICE"] = "백그라운드 CLI 워커를 중지했습니다."
         action_cols[2].caption("이 워커는 웹 페이지를 닫아도 계속 돌 수 있고, 텔레그램 제어 대상도 이 워커입니다.")
 
         if st.session_state.get("LIVE_BG_NOTICE"):
             st.info(str(st.session_state["LIVE_BG_NOTICE"]))
+        if execution_guard["background_worker_start_disabled"]:
+            st.warning("페이지 워커가 실행 중이면 백그라운드 워커 시작을 잠가둡니다. 한쪽만 실행해서 주문 경로를 하나로 유지하세요.")
+        if managed_status.get("heartbeat_stale"):
+            st.warning("백그라운드 워커 heartbeat가 오래 갱신되지 않았습니다. 프로세스는 살아 있어도 상태 저장이 멈췄을 수 있습니다.")
         managed_excluded = list(managed_status.get("config", {}).get("exclude_markets") or [])
         if managed_excluded:
             st.caption(f"제외 종목: {', '.join(managed_excluded)}")
@@ -2043,14 +2106,17 @@ def render_live():
     params["worker_interval"] = worker_interval
     changed = params != (st.session_state.get("LIVE_PARAMS") or {})
     st.session_state["LIVE_PARAMS"] = dict(params)
-    if "LIVE_WORKER" not in st.session_state:
-        st.session_state["LIVE_WORKER"] = _Worker()
-    worker: _Worker = st.session_state["LIVE_WORKER"]
     working_now = bool(st.session_state.get("LIVE_WORKING"))
     refresh = worker_cols[1].button("지금 새로고침", use_container_width=True, disabled=working_now)
-    start = worker_cols[2].button("페이지 워커 시작", use_container_width=True, disabled=working_now)
+    start = worker_cols[2].button(
+        "페이지 워커 시작",
+        use_container_width=True,
+        disabled=working_now or bool(execution_guard["page_worker_start_disabled"]),
+    )
     stop = worker_cols[3].button("페이지 워커 중지", use_container_width=True, disabled=not working_now)
     worker_cols[4].markdown(f"**모드:** {_mode_text('LIVE' if live_trading else 'SIM')} / **전략:** `{strategy_label(strategy_name)}`")
+    if execution_guard["page_worker_start_disabled"]:
+        st.caption("백그라운드 CLI 워커가 실행 중이라 페이지 워커 시작은 잠겨 있습니다. 이 페이지에서는 조회와 SIM 점검만 수행합니다.")
     if start:
         st.session_state["LIVE_WORKING"] = True
         st.session_state.pop("LIVE_REFRESH_NOTICE", None)
