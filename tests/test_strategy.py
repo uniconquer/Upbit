@@ -6,9 +6,11 @@ from src.paper_trader import PaperTrader
 from src.risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict
 from src.strategy import (
     backtest_signal_frame,
+    build_ema_pullback_signals,
     build_research_trend_signals,
     build_relative_strength_rotation_signals,
     build_rsi_bb_double_bottom_signals,
+    build_squeeze_breakout_signals,
     extract_backtest_trade_events,
     parameter_grid_size,
     rsi_signals,
@@ -55,6 +57,38 @@ def _double_bottom_ohlcv() -> pd.DataFrame:
         }
     )
     frame.index = pd.date_range("2026-02-01", periods=len(frame), freq="1h")
+    return frame
+
+
+def _pullback_trend_ohlcv() -> pd.DataFrame:
+    closes = [100, 102, 104, 106, 108, 110, 112, 114, 113, 111, 109, 110, 112, 115, 118, 121, 124, 126]
+    opens = [99] + closes[:-1]
+    frame = pd.DataFrame(
+        {
+            "open": opens,
+            "high": [max(o, c) + 1.2 for o, c in zip(opens, closes)],
+            "low": [min(o, c) - 1.2 for o, c in zip(opens, closes)],
+            "close": closes,
+            "volume": [1000, 1020, 1040, 1060, 1080, 1100, 1120, 1140, 1180, 1220, 1260, 1400, 1520, 1660, 1800, 1940, 2080, 2200],
+        }
+    )
+    frame.index = pd.date_range("2026-03-01", periods=len(frame), freq="1h")
+    return frame
+
+
+def _squeeze_breakout_ohlcv() -> pd.DataFrame:
+    closes = [100.0, 100.1, 99.9, 100.0, 100.1, 100.0, 99.95, 100.05, 100.0, 100.1, 100.15, 100.2, 100.1, 100.25, 101.4, 102.6, 103.8, 105.0, 106.2, 107.0]
+    opens = [100.0] + closes[:-1]
+    frame = pd.DataFrame(
+        {
+            "open": opens,
+            "high": [max(o, c) + 0.4 for o, c in zip(opens, closes)],
+            "low": [min(o, c) - 0.4 for o, c in zip(opens, closes)],
+            "close": closes,
+            "volume": [900, 880, 910, 905, 915, 920, 910, 925, 930, 940, 950, 960, 955, 970, 1600, 1850, 2100, 2200, 2300, 2400],
+        }
+    )
+    frame.index = pd.date_range("2026-03-10", periods=len(frame), freq="1h")
     return frame
 
 
@@ -126,6 +160,37 @@ def test_relative_strength_rotation_frame_contains_expected_columns():
     assert frame["sell_signal"].dtype == bool
 
 
+def test_ema_pullback_frame_contains_expected_columns_and_signal():
+    frame = build_ema_pullback_signals(
+        _pullback_trend_ohlcv(),
+        fast_ema=3,
+        slow_ema=6,
+        rsi_window=5,
+        rsi_floor=40.0,
+        rsi_ceiling=75.0,
+        pullback_tolerance_pct=1.5,
+        volume_window=4,
+        volume_threshold=0.95,
+        exit_rsi=82.0,
+    )
+
+    expected = {
+        "ema_fast",
+        "ema_slow",
+        "rsi",
+        "atr",
+        "pullback_band",
+        "atr_stop",
+        "strategy_score",
+        "buy_signal",
+        "sell_signal",
+    }
+    assert expected.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+    assert int(frame["buy_signal"].sum()) >= 1
+
+
 def test_rsi_bb_double_bottom_frame_contains_expected_columns_and_cycle():
     frame = build_rsi_bb_double_bottom_signals(
         _double_bottom_ohlcv(),
@@ -160,6 +225,39 @@ def test_rsi_bb_double_bottom_frame_contains_expected_columns_and_cycle():
     assert buy_index < sell_index
     assert frame.loc[buy_index, "trade_stop"] < frame.loc[buy_index, "close"]
     assert frame.loc[buy_index, "take_profit"] > frame.loc[buy_index, "close"]
+
+
+def test_squeeze_breakout_frame_contains_expected_columns_and_signal():
+    frame = build_squeeze_breakout_signals(
+        _squeeze_breakout_ohlcv(),
+        bb_len=5,
+        squeeze_window=5,
+        breakout_window=5,
+        trend_ema_window=6,
+        atr_window=4,
+        atr_mult=1.8,
+        volume_window=4,
+        volume_threshold=1.05,
+        squeeze_quantile=0.5,
+    )
+
+    expected = {
+        "trend_ema",
+        "bb_basis",
+        "bb_upper",
+        "bb_lower",
+        "bandwidth",
+        "breakout_high",
+        "squeeze_on",
+        "atr_stop",
+        "strategy_score",
+        "buy_signal",
+        "sell_signal",
+    }
+    assert expected.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+    assert int(frame["buy_signal"].sum()) >= 1
 
 
 def test_backtest_slippage_reduces_return():

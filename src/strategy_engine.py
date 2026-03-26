@@ -10,16 +10,20 @@ import pandas as pd
 try:
     from strategy import (
         backtest_signal_frame,
+        build_ema_pullback_signals,
         build_relative_strength_rotation_signals,
         build_research_trend_signals,
         build_rsi_bb_double_bottom_signals,
+        build_squeeze_breakout_signals,
     )
 except ImportError:
     from src.strategy import (
         backtest_signal_frame,
+        build_ema_pullback_signals,
         build_relative_strength_rotation_signals,
         build_research_trend_signals,
         build_rsi_bb_double_bottom_signals,
+        build_squeeze_breakout_signals,
     )
 
 FluxCallable = Callable[..., pd.DataFrame] | None
@@ -28,6 +32,8 @@ STRATEGY_LABELS = {
     "research_trend": "연구형 추세 돌파",
     "rsi_bb_double_bottom": "RSI+BB 더블바텀 롱",
     "relative_strength_rotation": "상대강도 로테이션",
+    "ema_pullback": "EMA 눌림목 추세",
+    "squeeze_breakout": "스퀴즈 돌파 추세",
     "flux_trend": "플럭스 추세 밴드",
     "flux_ema_filter": "플럭스 + EMA 필터",
 }
@@ -36,6 +42,8 @@ STRATEGY_DESCRIPTIONS = {
     "research_trend": "EMA 정배열, 돌파, ADX 추세 강도, ATR 이탈 손절을 함께 보는 추세 전략입니다.",
     "rsi_bb_double_bottom": "RSI 과매도와 볼린저 하단 세척 이후 첫 반등과 두 번째 바닥을 확인한 뒤 진입하는 반등 전략입니다.",
     "relative_strength_rotation": "여러 기간 수익률과 추세 강도를 합친 점수로 강한 종목을 따라가는 회전형 모멘텀 전략입니다.",
+    "ema_pullback": "상승 추세 중 EMA 눌림과 RSI 재정비 뒤 반등 봉이 나올 때만 진입하는 추세-눌림목 전략입니다.",
+    "squeeze_breakout": "볼린저 밴드 폭이 눌린 뒤 거래량과 함께 돌파가 나올 때만 따라가는 압축 돌파 전략입니다.",
     "flux_trend": "다중 시간대 밴드와 중심선 변화를 함께 보는 반전형 밴드 전략입니다.",
     "flux_ema_filter": "플럭스 신호 뒤에 EMA와 ATR 확인을 추가한 혼합형 추세-반전 전략입니다.",
 }
@@ -153,6 +161,37 @@ def build_strategy_frame(
             volume_threshold=float(params.get("volume_threshold", 0.9)),
             entry_score=float(params.get("entry_score", 8.0)),
             exit_score=float(params.get("exit_score", 2.0)),
+        )
+
+    if strategy_name == "ema_pullback":
+        return build_ema_pullback_signals(
+            raw,
+            fast_ema=int(params.get("fast_ema", 21)),
+            slow_ema=int(params.get("slow_ema", 55)),
+            rsi_window=int(params.get("rsi_window", 14)),
+            rsi_floor=float(params.get("rsi_floor", 42.0)),
+            rsi_ceiling=float(params.get("rsi_ceiling", 62.0)),
+            pullback_tolerance_pct=float(params.get("pullback_tolerance_pct", 0.6)),
+            atr_window=int(params.get("atr_window", 14)),
+            atr_mult=float(params.get("atr_mult", 2.0)),
+            volume_window=int(params.get("volume_window", 20)),
+            volume_threshold=float(params.get("volume_threshold", 0.9)),
+            exit_rsi=float(params.get("exit_rsi", 68.0)),
+        )
+
+    if strategy_name == "squeeze_breakout":
+        return build_squeeze_breakout_signals(
+            raw,
+            bb_len=int(params.get("bb_len", 20)),
+            bb_mult=float(params.get("bb_mult", 2.0)),
+            squeeze_window=int(params.get("squeeze_window", 20)),
+            breakout_window=int(params.get("breakout_window", 20)),
+            trend_ema_window=int(params.get("trend_ema_window", 55)),
+            atr_window=int(params.get("atr_window", 14)),
+            atr_mult=float(params.get("atr_mult", 2.0)),
+            volume_window=int(params.get("volume_window", 20)),
+            volume_threshold=float(params.get("volume_threshold", 1.1)),
+            squeeze_quantile=float(params.get("squeeze_quantile", 0.35)),
         )
 
     if strategy_name == "flux_trend":

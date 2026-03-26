@@ -116,6 +116,38 @@ def test_build_strategy_frame_relative_strength_rotation_uses_shared_builder():
     assert frame["sell_signal"].dtype == bool
 
 
+def test_build_strategy_frame_ema_pullback_uses_shared_builder():
+    closes = [100, 102, 104, 106, 108, 110, 112, 114, 113, 111, 109, 110, 112, 115, 118, 121]
+    frame = pd.DataFrame(
+        {
+            "open": [99] + closes[:-1],
+            "high": [value + 1.0 for value in closes],
+            "low": [value - 1.0 for value in closes],
+            "close": closes,
+            "volume": [1000 + idx * 40 for idx, _ in enumerate(closes)],
+        },
+        index=pd.date_range("2026-03-01", periods=len(closes), freq="1h"),
+    )
+
+    result = build_strategy_frame(
+        frame,
+        strategy_name="ema_pullback",
+        params={
+            "fast_ema": 3,
+            "slow_ema": 6,
+            "rsi_window": 5,
+            "rsi_floor": 40.0,
+            "rsi_ceiling": 68.0,
+            "pullback_tolerance_pct": 1.5,
+            "volume_window": 4,
+        },
+    )
+
+    assert {"ema_fast", "ema_slow", "rsi", "pullback_band", "atr_stop", "strategy_score"}.issubset(result.columns)
+    assert result["buy_signal"].dtype == bool
+    assert result["sell_signal"].dtype == bool
+
+
 def test_build_strategy_frame_rsi_bb_double_bottom_uses_shared_builder():
     closes = [
         120, 119, 118, 117, 116, 115, 114, 113, 112, 111,
@@ -150,6 +182,38 @@ def test_build_strategy_frame_rsi_bb_double_bottom_uses_shared_builder():
     assert result["buy_signal"].dtype == bool
     assert result["sell_signal"].dtype == bool
     assert int(result["buy_signal"].sum()) >= 1
+
+
+def test_build_strategy_frame_squeeze_breakout_uses_shared_builder():
+    closes = [100.0, 100.1, 99.9, 100.0, 100.1, 100.0, 99.95, 100.05, 100.0, 100.1, 100.15, 100.2, 100.1, 100.25, 101.4, 102.6, 103.8, 105.0]
+    frame = pd.DataFrame(
+        {
+            "open": [100.0] + closes[:-1],
+            "high": [value + 0.4 for value in closes],
+            "low": [value - 0.4 for value in closes],
+            "close": closes,
+            "volume": [900 + idx * 20 for idx, _ in enumerate(closes)],
+        },
+        index=pd.date_range("2026-03-10", periods=len(closes), freq="1h"),
+    )
+
+    result = build_strategy_frame(
+        frame,
+        strategy_name="squeeze_breakout",
+        params={
+            "bb_len": 5,
+            "squeeze_window": 5,
+            "breakout_window": 5,
+            "trend_ema_window": 6,
+            "atr_window": 4,
+            "volume_window": 4,
+            "volume_threshold": 1.0,
+        },
+    )
+
+    assert {"trend_ema", "bb_basis", "bandwidth", "breakout_high", "squeeze_on", "atr_stop"}.issubset(result.columns)
+    assert result["buy_signal"].dtype == bool
+    assert result["sell_signal"].dtype == bool
 
 
 def test_build_strategy_frame_flux_ema_filter_uses_combo_signals():

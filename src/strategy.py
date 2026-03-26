@@ -575,6 +575,126 @@ def build_rsi_bb_double_bottom_signals(
     return df
 
 
+def build_ema_pullback_signals(
+    raw: pd.DataFrame,
+    *,
+    fast_ema: int = 21,
+    slow_ema: int = 55,
+    rsi_window: int = 14,
+    rsi_floor: float = 42.0,
+    rsi_ceiling: float = 62.0,
+    pullback_tolerance_pct: float = 0.6,
+    atr_window: int = 14,
+    atr_mult: float = 2.0,
+    volume_window: int = 20,
+    volume_threshold: float = 0.9,
+    exit_rsi: float = 68.0,
+) -> pd.DataFrame:
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(raw.columns):
+        missing = ", ".join(sorted(required - set(raw.columns)))
+        raise ValueError(f"raw data missing columns: {missing}")
+
+    df = raw.copy()
+    open_ = df["open"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+
+    df["ema_fast"] = ema(close, fast_ema)
+    df["ema_slow"] = ema(close, slow_ema)
+    df["rsi"] = relative_strength_index(close, rsi_window)
+    df["atr"] = average_true_range(df, atr_window)
+    df["volume_ratio"] = df["volume"] / df["volume"].rolling(volume_window).mean().replace(0.0, np.nan)
+
+    trend_gap = ((close / df["ema_slow"]) - 1.0) * 100.0
+    fast_slope = df["ema_fast"].pct_change(max(2, fast_ema // 3)) * 100.0
+    pullback_band = df["ema_fast"] * (1.0 + (pullback_tolerance_pct / 100.0))
+    df["pullback_band"] = pullback_band
+    df["atr_stop"] = df["ema_slow"] - (atr_mult * df["atr"])
+    df["strategy_score"] = (
+        trend_gap.fillna(0.0) * 1.4
+        + fast_slope.fillna(0.0) * 6.0
+        + (df["volume_ratio"].fillna(1.0) - 1.0) * 8.0
+        - (df["rsi"].sub(50.0).abs().fillna(50.0) * 0.25)
+    )
+
+    slope_window = max(2, slow_ema // 5)
+    regime_ok = (close > df["ema_slow"]) & (df["ema_fast"] > df["ema_slow"]) & (df["ema_slow"] > df["ema_slow"].shift(slope_window))
+    pullback = (low <= pullback_band) & (close >= (df["ema_fast"] * (1.0 - (pullback_tolerance_pct / 100.0))))
+    rebound = (close > open_) & (close > close.shift(1))
+    rsi_reset = df["rsi"].between(rsi_floor, rsi_ceiling, inclusive="both")
+    volume_ok = df["volume_ratio"].fillna(1.0) >= volume_threshold
+    raw_buy = regime_ok & pullback & rebound & rsi_reset & volume_ok
+
+    exit_on_rsi = (df["rsi"] >= exit_rsi) & (close < close.shift(1))
+    trend_fail = close < df["ema_slow"]
+    raw_sell = trend_fail | (close < df["atr_stop"]) | exit_on_rsi
+
+    df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
+    df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
+def build_squeeze_breakout_signals(
+    raw: pd.DataFrame,
+    *,
+    bb_len: int = 20,
+    bb_mult: float = 2.0,
+    squeeze_window: int = 20,
+    breakout_window: int = 20,
+    trend_ema_window: int = 55,
+    atr_window: int = 14,
+    atr_mult: float = 2.0,
+    volume_window: int = 20,
+    volume_threshold: float = 1.1,
+    squeeze_quantile: float = 0.35,
+) -> pd.DataFrame:
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(raw.columns):
+        missing = ", ".join(sorted(required - set(raw.columns)))
+        raise ValueError(f"raw data missing columns: {missing}")
+
+    df = raw.copy()
+    close = df["close"].astype(float)
+
+    df["trend_ema"] = ema(close, trend_ema_window)
+    df["atr"] = average_true_range(df, atr_window)
+    bb_basis, bb_upper, bb_lower = bollinger_bands(close, bb_len, bb_mult)
+    df["bb_basis"] = bb_basis
+    df["bb_upper"] = bb_upper
+    df["bb_lower"] = bb_lower
+    df["bandwidth"] = ((bb_upper - bb_lower) / bb_basis.replace(0.0, np.nan)) * 100.0
+    df["breakout_high"] = df["high"].rolling(breakout_window).max().shift(1)
+    df["volume_ratio"] = df["volume"] / df["volume"].rolling(volume_window).mean().replace(0.0, np.nan)
+    df["atr_stop"] = df["trend_ema"] - (atr_mult * df["atr"])
+
+    squeeze_ref = df["bandwidth"].rolling(squeeze_window, min_periods=max(5, squeeze_window // 2)).quantile(squeeze_quantile).shift(1)
+    squeeze_on = (df["bandwidth"] <= squeeze_ref).fillna(False)
+    recent_squeeze = squeeze_on.rolling(4, min_periods=1).max().astype(bool)
+    breakout = close > df["breakout_high"]
+    trend_ok = (close > df["trend_ema"]) & (df["trend_ema"] > df["trend_ema"].shift(max(2, trend_ema_window // 5)))
+    volume_ok = df["volume_ratio"].fillna(1.0) >= volume_threshold
+    momentum = close.pct_change(max(2, breakout_window // 3)) * 100.0
+
+    compression_bonus = (squeeze_ref - df["bandwidth"]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    breakout_gap = ((close / df["breakout_high"].replace(0.0, np.nan)) - 1.0) * 100.0
+    df["squeeze_on"] = squeeze_on
+    df["strategy_score"] = (
+        breakout_gap.fillna(0.0) * 18.0
+        + momentum.fillna(0.0) * 1.2
+        + (df["volume_ratio"].fillna(1.0) - 1.0) * 8.0
+        + compression_bonus * 2.0
+        - df["bandwidth"].fillna(0.0) * 0.15
+    )
+
+    raw_buy = recent_squeeze & breakout & trend_ok & volume_ok
+    raw_sell = (close < df["trend_ema"]) | (close < df["atr_stop"]) | ((close < df["bb_basis"]) & (df["bandwidth"] > df["bandwidth"].shift(1)))
+
+    df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
+    df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
 def backtest_signal_frame(
     df: pd.DataFrame,
     *,
