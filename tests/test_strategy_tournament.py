@@ -77,6 +77,21 @@ def test_backtest_portfolio_signal_frames_uses_shared_cash_and_liquidates():
     assert round(float(result["total_return_pct"]), 6) == 32.0
 
 
+def test_backtest_portfolio_signal_frames_treats_non_positive_max_positions_as_unlimited():
+    result = backtest_portfolio_signal_frames(
+        _portfolio_signal_frames(),
+        strategy_name="test",
+        initial_cash=10000.0,
+        max_positions=0,
+        fee=0.0,
+        slippage_bps=0.0,
+        liquidate_at_end=True,
+    )
+
+    assert result["trades"] == 2
+    assert float(result["final_equity"]) == 13200.0
+
+
 def test_compare_portfolio_strategies_returns_rows_for_new_strategies():
     raw_by_market = {
         "KRW-TREND": _trend_market(),

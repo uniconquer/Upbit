@@ -55,7 +55,7 @@ def backtest_portfolio_signal_frames(
     *,
     strategy_name: str = "portfolio",
     initial_cash: float = 10000.0,
-    max_positions: int = 3,
+    max_positions: int | None = 3,
     allocation_pct: float = 1.0,
     min_trade_krw: float = 0.0,
     fee: float = 0.0005,
@@ -82,7 +82,6 @@ def backtest_portfolio_signal_frames(
         }
 
     resolved_cash = max(float(initial_cash), 0.0)
-    resolved_max_positions = max(int(max_positions), 1)
     resolved_allocation_pct = min(max(float(allocation_pct), 0.0), 1.0)
     resolved_min_trade = max(float(min_trade_krw), 0.0)
 
@@ -106,6 +105,15 @@ def backtest_portfolio_signal_frames(
             "equity": pd.Series(dtype=float),
             "trade_log": [],
         }
+
+    if max_positions is None:
+        resolved_max_positions = len(aligned_frames)
+    else:
+        try:
+            requested_positions = int(max_positions)
+        except Exception:
+            requested_positions = 0
+        resolved_max_positions = len(aligned_frames) if requested_positions <= 0 else max(requested_positions, 1)
 
     trader = PaperTrader()
     price_map: dict[str, float] = {}
@@ -228,7 +236,7 @@ def portfolio_backtest(
     strategy_name: str,
     params: Mapping[str, Any] | None = None,
     initial_cash: float = 10000.0,
-    max_positions: int = 3,
+    max_positions: int | None = 3,
     allocation_pct: float = 1.0,
     min_trade_krw: float = 0.0,
     fee: float = 0.0005,
@@ -266,7 +274,7 @@ def compare_portfolio_strategies(
     *,
     strategies: list[dict[str, Any]],
     initial_cash: float = 10000.0,
-    max_positions: int = 3,
+    max_positions: int | None = 3,
     allocation_pct: float = 1.0,
     min_trade_krw: float = 0.0,
     fee: float = 0.0005,
