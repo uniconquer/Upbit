@@ -11,18 +11,22 @@ try:
     from strategy import (
         backtest_signal_frame,
         build_ema_pullback_signals,
+        build_regime_blend_signals,
         build_relative_strength_rotation_signals,
         build_research_trend_signals,
         build_rsi_bb_double_bottom_signals,
+        build_rsi_trend_guard_signals,
         build_squeeze_breakout_signals,
     )
 except ImportError:
     from src.strategy import (
         backtest_signal_frame,
         build_ema_pullback_signals,
+        build_regime_blend_signals,
         build_relative_strength_rotation_signals,
         build_research_trend_signals,
         build_rsi_bb_double_bottom_signals,
+        build_rsi_trend_guard_signals,
         build_squeeze_breakout_signals,
     )
 
@@ -34,6 +38,8 @@ STRATEGY_LABELS = {
     "relative_strength_rotation": "상대강도 로테이션",
     "ema_pullback": "EMA 눌림목 추세",
     "squeeze_breakout": "스퀴즈 돌파 추세",
+    "rsi_trend_guard": "RSI 반등 + 추세 가드",
+    "regime_blend": "장세 적응 혼합",
     "flux_trend": "플럭스 추세 밴드",
     "flux_ema_filter": "플럭스 + EMA 필터",
 }
@@ -44,6 +50,8 @@ STRATEGY_DESCRIPTIONS = {
     "relative_strength_rotation": "여러 기간 수익률과 추세 강도를 합친 점수로 강한 종목을 따라가는 회전형 모멘텀 전략입니다.",
     "ema_pullback": "상승 추세 중 EMA 눌림과 RSI 재정비 뒤 반등 봉이 나올 때만 진입하는 추세-눌림목 전략입니다.",
     "squeeze_breakout": "볼린저 밴드 폭이 눌린 뒤 거래량과 함께 돌파가 나올 때만 따라가는 압축 돌파 전략입니다.",
+    "rsi_trend_guard": "RSI 이중 바닥 반등은 유지하되, 강한 약세 추세에서는 매수를 막고 조기 이탈하는 보호형 반등 전략입니다.",
+    "regime_blend": "추세가 강하면 추세 돌파를, 그렇지 않으면 RSI 반등을 쓰는 장세 적응형 혼합 전략입니다.",
     "flux_trend": "다중 시간대 밴드와 중심선 변화를 함께 보는 반전형 밴드 전략입니다.",
     "flux_ema_filter": "플럭스 신호 뒤에 EMA와 ATR 확인을 추가한 혼합형 추세-반전 전략입니다.",
 }
@@ -179,6 +187,28 @@ def build_strategy_frame(
             exit_rsi=float(params.get("exit_rsi", 68.0)),
         )
 
+    if strategy_name == "rsi_trend_guard":
+        return build_rsi_trend_guard_signals(
+            raw,
+            rsi_len=int(params.get("rsi_len", 10)),
+            oversold=float(params.get("oversold", 35.0)),
+            bb_len=int(params.get("bb_len", 20)),
+            bb_mult=float(params.get("bb_mult", 1.5)),
+            min_down_bars=int(params.get("min_down_bars", 2)),
+            low_tolerance_pct=float(params.get("low_tolerance_pct", 1.0)),
+            max_setup_bars=int(params.get("max_setup_bars", 6)),
+            confirm_bars=int(params.get("confirm_bars", 3)),
+            use_macd_filter=_as_bool(params.get("use_macd_filter"), True),
+            macd_lookback=int(params.get("macd_lookback", 5)),
+            risk_reward=float(params.get("risk_reward", 1.5)),
+            stop_buffer_ticks=int(params.get("stop_buffer_ticks", 2)),
+            trend_fast_ema=int(params.get("trend_fast_ema", 13)),
+            trend_slow_ema=int(params.get("trend_slow_ema", 89)),
+            trend_buffer_pct=float(params.get("trend_buffer_pct", 2.0)),
+            bearish_adx_floor=float(params.get("bearish_adx_floor", 14.0)),
+            adx_window=int(params.get("adx_window", 14)),
+        )
+
     if strategy_name == "squeeze_breakout":
         return build_squeeze_breakout_signals(
             raw,
@@ -192,6 +222,35 @@ def build_strategy_frame(
             volume_window=int(params.get("volume_window", 20)),
             volume_threshold=float(params.get("volume_threshold", 1.1)),
             squeeze_quantile=float(params.get("squeeze_quantile", 0.35)),
+        )
+
+    if strategy_name == "regime_blend":
+        return build_regime_blend_signals(
+            raw,
+            trend_fast_ema=int(params.get("trend_fast_ema", 21)),
+            trend_slow_ema=int(params.get("trend_slow_ema", 55)),
+            trend_breakout_window=int(params.get("trend_breakout_window", 20)),
+            trend_exit_window=int(params.get("trend_exit_window", 10)),
+            trend_atr_window=int(params.get("trend_atr_window", 14)),
+            trend_atr_mult=float(params.get("trend_atr_mult", 2.5)),
+            trend_adx_window=int(params.get("trend_adx_window", 14)),
+            trend_adx_threshold=float(params.get("trend_adx_threshold", 18.0)),
+            trend_momentum_window=int(params.get("trend_momentum_window", 20)),
+            trend_volume_window=int(params.get("trend_volume_window", 20)),
+            trend_volume_threshold=float(params.get("trend_volume_threshold", 0.9)),
+            rsi_len=int(params.get("rsi_len", 10)),
+            oversold=float(params.get("oversold", 35.0)),
+            bb_len=int(params.get("bb_len", 20)),
+            bb_mult=float(params.get("bb_mult", 2.0)),
+            min_down_bars=int(params.get("min_down_bars", 2)),
+            low_tolerance_pct=float(params.get("low_tolerance_pct", 1.0)),
+            max_setup_bars=int(params.get("max_setup_bars", 12)),
+            confirm_bars=int(params.get("confirm_bars", 5)),
+            use_macd_filter=_as_bool(params.get("use_macd_filter"), True),
+            macd_lookback=int(params.get("macd_lookback", 5)),
+            risk_reward=float(params.get("risk_reward", 1.5)),
+            stop_buffer_ticks=int(params.get("stop_buffer_ticks", 2)),
+            regime_adx_floor=float(params.get("regime_adx_floor", 16.0)),
         )
 
     if strategy_name == "flux_trend":

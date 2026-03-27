@@ -184,6 +184,48 @@ def test_build_strategy_frame_rsi_bb_double_bottom_uses_shared_builder():
     assert int(result["buy_signal"].sum()) >= 1
 
 
+def test_build_strategy_frame_rsi_trend_guard_uses_shared_builder():
+    closes = [
+        120, 119, 118, 117, 116, 115, 114, 113, 112, 111,
+        109, 107, 105, 103, 101, 99, 97, 95, 93, 91,
+        89, 87, 86, 88, 92, 95, 93, 91, 90, 92,
+        95, 98, 101, 105, 109, 113, 117, 121, 125, 129,
+    ]
+    frame = pd.DataFrame(
+        {
+            "open": [121] + closes[:-1],
+            "high": [value + 1.5 for value in closes],
+            "low": [value - 1.5 for value in closes],
+            "close": closes,
+            "volume": [1000 + idx * 20 for idx, _ in enumerate(closes)],
+        },
+        index=pd.date_range("2026-02-01", periods=len(closes), freq="1h"),
+    )
+
+    result = build_strategy_frame(
+        frame,
+        strategy_name="rsi_trend_guard",
+        params={
+            "rsi_len": 8,
+            "oversold": 38.0,
+            "bb_len": 10,
+            "bb_mult": 1.4,
+            "max_setup_bars": 12,
+            "confirm_bars": 8,
+            "use_macd_filter": False,
+            "trend_fast_ema": 4,
+            "trend_slow_ema": 12,
+            "trend_buffer_pct": 2.0,
+            "bearish_adx_floor": 12.0,
+            "adx_window": 5,
+        },
+    )
+
+    assert {"ema_fast", "ema_slow", "adx", "bearish_regime", "trend_filter", "base_buy_signal", "base_sell_signal"}.issubset(result.columns)
+    assert result["buy_signal"].dtype == bool
+    assert result["sell_signal"].dtype == bool
+
+
 def test_build_strategy_frame_squeeze_breakout_uses_shared_builder():
     closes = [100.0, 100.1, 99.9, 100.0, 100.1, 100.0, 99.95, 100.05, 100.0, 100.1, 100.15, 100.2, 100.1, 100.25, 101.4, 102.6, 103.8, 105.0]
     frame = pd.DataFrame(
@@ -214,6 +256,56 @@ def test_build_strategy_frame_squeeze_breakout_uses_shared_builder():
     assert {"trend_ema", "bb_basis", "bandwidth", "breakout_high", "squeeze_on", "atr_stop"}.issubset(result.columns)
     assert result["buy_signal"].dtype == bool
     assert result["sell_signal"].dtype == bool
+
+
+def test_build_strategy_frame_regime_blend_uses_shared_builder():
+    closes = [
+        120, 119, 118, 117, 116, 115, 114, 113, 112, 111,
+        109, 107, 105, 103, 101, 99, 97, 95, 93, 91,
+        89, 87, 86, 88, 92, 95, 93, 91, 90, 92,
+        95, 98, 101, 105, 109, 113, 117, 121, 125, 129,
+    ]
+    frame = pd.DataFrame(
+        {
+            "open": [121] + closes[:-1],
+            "high": [value + 1.5 for value in closes],
+            "low": [value - 1.5 for value in closes],
+            "close": closes,
+            "volume": [1000 + idx * 20 for idx, _ in enumerate(closes)],
+        },
+        index=pd.date_range("2026-02-01", periods=len(closes), freq="1h"),
+    )
+
+    result = build_strategy_frame(
+        frame,
+        strategy_name="regime_blend",
+        params={
+            "trend_fast_ema": 4,
+            "trend_slow_ema": 8,
+            "trend_breakout_window": 6,
+            "trend_exit_window": 4,
+            "trend_atr_window": 5,
+            "trend_atr_mult": 2.0,
+            "trend_adx_window": 5,
+            "trend_adx_threshold": 10.0,
+            "trend_momentum_window": 4,
+            "trend_volume_window": 4,
+            "trend_volume_threshold": 0.8,
+            "rsi_len": 8,
+            "oversold": 38.0,
+            "bb_len": 10,
+            "bb_mult": 1.4,
+            "max_setup_bars": 12,
+            "confirm_bars": 8,
+            "use_macd_filter": False,
+            "regime_adx_floor": 8.0,
+        },
+    )
+
+    assert {"trend_regime", "trend_score", "range_score", "ema_fast", "ema_slow", "adx", "rsi", "trend_buy_signal", "range_buy_signal", "entry_mode"}.issubset(result.columns)
+    assert result["buy_signal"].dtype == bool
+    assert result["sell_signal"].dtype == bool
+    assert result["trend_regime"].dtype == bool
 
 
 def test_build_strategy_frame_flux_ema_filter_uses_combo_signals():

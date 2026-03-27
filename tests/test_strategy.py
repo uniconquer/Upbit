@@ -7,9 +7,11 @@ from src.risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_f
 from src.strategy import (
     backtest_signal_frame,
     build_ema_pullback_signals,
+    build_regime_blend_signals,
     build_research_trend_signals,
     build_relative_strength_rotation_signals,
     build_rsi_bb_double_bottom_signals,
+    build_rsi_trend_guard_signals,
     build_squeeze_breakout_signals,
     extract_backtest_trade_events,
     parameter_grid_size,
@@ -258,6 +260,93 @@ def test_squeeze_breakout_frame_contains_expected_columns_and_signal():
     assert frame["buy_signal"].dtype == bool
     assert frame["sell_signal"].dtype == bool
     assert int(frame["buy_signal"].sum()) >= 1
+
+
+def test_regime_blend_frame_contains_expected_columns_and_both_modes():
+    frame = build_regime_blend_signals(
+        _double_bottom_ohlcv(),
+        trend_fast_ema=4,
+        trend_slow_ema=8,
+        trend_breakout_window=6,
+        trend_exit_window=4,
+        trend_atr_window=5,
+        trend_atr_mult=2.0,
+        trend_adx_window=5,
+        trend_adx_threshold=10.0,
+        trend_momentum_window=4,
+        trend_volume_window=4,
+        trend_volume_threshold=0.8,
+        rsi_len=8,
+        oversold=38.0,
+        bb_len=10,
+        bb_mult=1.4,
+        min_down_bars=2,
+        low_tolerance_pct=1.5,
+        max_setup_bars=12,
+        confirm_bars=8,
+        use_macd_filter=False,
+        risk_reward=1.2,
+        regime_adx_floor=8.0,
+    )
+
+    expected = {
+        "trend_regime",
+        "trend_score",
+        "range_score",
+        "strategy_score",
+        "ema_fast",
+        "ema_slow",
+        "adx",
+        "rsi",
+        "bb_lower",
+        "trend_buy_signal",
+        "range_buy_signal",
+        "entry_mode",
+        "buy_signal",
+        "sell_signal",
+    }
+    assert expected.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+    assert frame["trend_regime"].dtype == bool
+    assert frame["trend_regime"].any()
+    assert (~frame["trend_regime"]).any()
+    assert int(frame["buy_signal"].sum()) >= 1
+
+
+def test_rsi_trend_guard_adds_bearish_filter_columns():
+    frame = build_rsi_trend_guard_signals(
+        _double_bottom_ohlcv(),
+        rsi_len=8,
+        oversold=38.0,
+        bb_len=10,
+        bb_mult=1.4,
+        max_setup_bars=12,
+        confirm_bars=8,
+        use_macd_filter=False,
+        trend_fast_ema=4,
+        trend_slow_ema=12,
+        trend_buffer_pct=2.0,
+        bearish_adx_floor=12.0,
+        adx_window=5,
+    )
+
+    expected = {
+        "ema_fast",
+        "ema_slow",
+        "adx",
+        "bearish_regime",
+        "trend_filter",
+        "base_buy_signal",
+        "base_sell_signal",
+        "buy_signal",
+        "sell_signal",
+    }
+    assert expected.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+    assert frame["trend_filter"].dtype == bool
+    assert frame["buy_signal"].sum() <= frame["base_buy_signal"].sum()
 
 
 def test_backtest_slippage_reduces_return():

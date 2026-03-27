@@ -575,6 +575,66 @@ def build_rsi_bb_double_bottom_signals(
     return df
 
 
+def build_rsi_trend_guard_signals(
+    raw: pd.DataFrame,
+    *,
+    rsi_len: int = 10,
+    oversold: float = 35.0,
+    bb_len: int = 20,
+    bb_mult: float = 1.5,
+    min_down_bars: int = 2,
+    low_tolerance_pct: float = 1.0,
+    max_setup_bars: int = 6,
+    confirm_bars: int = 3,
+    use_macd_filter: bool = True,
+    macd_lookback: int = 5,
+    risk_reward: float = 1.5,
+    stop_buffer_ticks: int = 2,
+    trend_fast_ema: int = 13,
+    trend_slow_ema: int = 89,
+    trend_buffer_pct: float = 2.0,
+    bearish_adx_floor: float = 14.0,
+    adx_window: int = 14,
+) -> pd.DataFrame:
+    df = build_rsi_bb_double_bottom_signals(
+        raw,
+        rsi_len=rsi_len,
+        oversold=oversold,
+        bb_len=bb_len,
+        bb_mult=bb_mult,
+        min_down_bars=min_down_bars,
+        low_tolerance_pct=low_tolerance_pct,
+        max_setup_bars=max_setup_bars,
+        confirm_bars=confirm_bars,
+        use_macd_filter=use_macd_filter,
+        macd_lookback=macd_lookback,
+        risk_reward=risk_reward,
+        stop_buffer_ticks=stop_buffer_ticks,
+    )
+
+    close = df["close"].astype(float)
+    df["ema_fast"] = ema(close, trend_fast_ema)
+    df["ema_slow"] = ema(close, trend_slow_ema)
+    df["adx"] = average_directional_index(df, adx_window)
+
+    slow_buffer = 1.0 - (max(float(trend_buffer_pct), 0.0) / 100.0)
+    bearish_regime = (
+        (close < (df["ema_slow"] * slow_buffer))
+        & (df["ema_fast"] < df["ema_slow"])
+        & (df["adx"] >= float(bearish_adx_floor))
+    ).fillna(False)
+    trend_filter = (~bearish_regime).astype(bool)
+
+    df["bearish_regime"] = bearish_regime
+    df["trend_filter"] = trend_filter
+    df["base_buy_signal"] = df["buy_signal"].astype(bool)
+    df["base_sell_signal"] = df["sell_signal"].astype(bool)
+    df["strategy_score"] = pd.to_numeric(df["strategy_score"], errors="coerce").fillna(0.0) + (trend_filter.astype(float) * 0.5)
+    df["buy_signal"] = df["base_buy_signal"] & trend_filter
+    df["sell_signal"] = df["base_sell_signal"] | bearish_regime
+    return df
+
+
 def build_ema_pullback_signals(
     raw: pd.DataFrame,
     *,
@@ -692,6 +752,120 @@ def build_squeeze_breakout_signals(
 
     df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
     df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
+def build_regime_blend_signals(
+    raw: pd.DataFrame,
+    *,
+    trend_fast_ema: int = 21,
+    trend_slow_ema: int = 55,
+    trend_breakout_window: int = 20,
+    trend_exit_window: int = 10,
+    trend_atr_window: int = 14,
+    trend_atr_mult: float = 2.5,
+    trend_adx_window: int = 14,
+    trend_adx_threshold: float = 18.0,
+    trend_momentum_window: int = 20,
+    trend_volume_window: int = 20,
+    trend_volume_threshold: float = 0.9,
+    rsi_len: int = 10,
+    oversold: float = 35.0,
+    bb_len: int = 20,
+    bb_mult: float = 2.0,
+    min_down_bars: int = 2,
+    low_tolerance_pct: float = 1.0,
+    max_setup_bars: int = 12,
+    confirm_bars: int = 5,
+    use_macd_filter: bool = True,
+    macd_lookback: int = 5,
+    risk_reward: float = 1.5,
+    stop_buffer_ticks: int = 2,
+    regime_adx_floor: float = 16.0,
+) -> pd.DataFrame:
+    trend_frame = build_research_trend_signals(
+        raw,
+        fast_ema=trend_fast_ema,
+        slow_ema=trend_slow_ema,
+        breakout_window=trend_breakout_window,
+        exit_window=trend_exit_window,
+        atr_window=trend_atr_window,
+        atr_mult=trend_atr_mult,
+        adx_window=trend_adx_window,
+        adx_threshold=trend_adx_threshold,
+        momentum_window=trend_momentum_window,
+        volume_window=trend_volume_window,
+        volume_threshold=trend_volume_threshold,
+    )
+    range_frame = build_rsi_bb_double_bottom_signals(
+        raw,
+        rsi_len=rsi_len,
+        oversold=oversold,
+        bb_len=bb_len,
+        bb_mult=bb_mult,
+        min_down_bars=min_down_bars,
+        low_tolerance_pct=low_tolerance_pct,
+        max_setup_bars=max_setup_bars,
+        confirm_bars=confirm_bars,
+        use_macd_filter=use_macd_filter,
+        macd_lookback=macd_lookback,
+        risk_reward=risk_reward,
+        stop_buffer_ticks=stop_buffer_ticks,
+    )
+
+    df = raw.copy()
+    close = df["close"].astype(float)
+    trend_regime = (
+        (close > trend_frame["ema_slow"])
+        & (trend_frame["ema_fast"] > trend_frame["ema_slow"])
+        & (trend_frame["adx"] >= regime_adx_floor)
+    ).fillna(False)
+    df["trend_regime"] = trend_regime
+    df["trend_score"] = pd.to_numeric(trend_frame.get("strategy_score"), errors="coerce").fillna(0.0)
+    df["range_score"] = pd.to_numeric(range_frame.get("strategy_score"), errors="coerce").fillna(0.0)
+    df["strategy_score"] = df["trend_score"].where(trend_regime, df["range_score"])
+    df["ema_fast"] = trend_frame["ema_fast"]
+    df["ema_slow"] = trend_frame["ema_slow"]
+    df["adx"] = trend_frame["adx"]
+    df["atr_stop"] = trend_frame["atr_stop"]
+    df["rsi"] = range_frame["rsi"]
+    df["bb_lower"] = range_frame["bb_lower"]
+    df["bb_upper"] = range_frame["bb_upper"]
+    df["trade_stop"] = range_frame["trade_stop"]
+    df["take_profit"] = range_frame["take_profit"]
+    df["trend_buy_signal"] = trend_frame["buy_signal"].astype(bool)
+    df["trend_sell_signal"] = trend_frame["sell_signal"].astype(bool)
+    df["range_buy_signal"] = range_frame["buy_signal"].astype(bool)
+    df["range_sell_signal"] = range_frame["sell_signal"].astype(bool)
+
+    buy_signal = pd.Series(False, index=df.index, dtype=bool)
+    sell_signal = pd.Series(False, index=df.index, dtype=bool)
+    active_mode: str | None = None
+    mode_trace: list[str] = []
+
+    for ts in df.index:
+        if active_mode == "trend":
+            if bool(df.at[ts, "trend_sell_signal"]):
+                sell_signal.at[ts] = True
+                active_mode = None
+        elif active_mode == "range":
+            if bool(df.at[ts, "range_sell_signal"]):
+                sell_signal.at[ts] = True
+                active_mode = None
+
+        if active_mode is None:
+            if bool(df.at[ts, "trend_regime"]) and bool(df.at[ts, "trend_buy_signal"]):
+                buy_signal.at[ts] = True
+                active_mode = "trend"
+            elif (not bool(df.at[ts, "trend_regime"])) and bool(df.at[ts, "range_buy_signal"]):
+                buy_signal.at[ts] = True
+                active_mode = "range"
+
+        mode_trace.append(active_mode or "")
+
+    df["entry_mode"] = pd.Series(mode_trace, index=df.index, dtype="string")
+    df["buy_signal"] = buy_signal
+    df["sell_signal"] = sell_signal
     return df
 
 
