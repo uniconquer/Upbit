@@ -17,6 +17,7 @@ try:
         bollinger_bands,
         ema,
         relative_strength_index,
+        VOLATILITY_RESET_BREAKOUT_DEFAULTS,
     )
     from strategy_engine import build_strategy_frame, strategy_label
     from strategy_tournament import backtest_portfolio_signal_frames
@@ -27,6 +28,7 @@ except ImportError:
         bollinger_bands,
         ema,
         relative_strength_index,
+        VOLATILITY_RESET_BREAKOUT_DEFAULTS,
     )
     from src.strategy_engine import build_strategy_frame, strategy_label
     from src.strategy_tournament import backtest_portfolio_signal_frames
@@ -314,18 +316,7 @@ def seed_candidates() -> list[CandidateSpec]:
             "volume_threshold": 1.1,
         }),
         ("invent", "engine", "volatility_reset_breakout", {
-            "fast_ema": 20,
-            "slow_ema": 60,
-            "bb_len": 20,
-            "bb_mult": 2.0,
-            "breakout_window": 18,
-            "reset_window": 8,
-            "atr_window": 14,
-            "atr_mult": 2.1,
-            "volume_window": 20,
-            "volume_threshold": 1.0,
-            "spike_window": 24,
-            "spike_quantile": 0.7,
+            **dict(VOLATILITY_RESET_BREAKOUT_DEFAULTS),
         }),
         ("invent", "lab", "lab_breakout_reversion_v1", {
             "trend_fast_ema": 21,

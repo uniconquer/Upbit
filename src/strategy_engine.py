@@ -20,6 +20,7 @@ try:
         build_rsi_trend_guard_signals,
         build_squeeze_breakout_signals,
         build_volatility_reset_breakout_signals,
+        VOLATILITY_RESET_BREAKOUT_DEFAULTS,
     )
 except ImportError:
     from src.strategy import (
@@ -34,6 +35,7 @@ except ImportError:
         build_rsi_trend_guard_signals,
         build_squeeze_breakout_signals,
         build_volatility_reset_breakout_signals,
+        VOLATILITY_RESET_BREAKOUT_DEFAULTS,
     )
 
 FluxCallable = Callable[..., pd.DataFrame] | None
@@ -274,18 +276,18 @@ def build_strategy_frame(
     if strategy_name == "volatility_reset_breakout":
         return build_volatility_reset_breakout_signals(
             raw,
-            fast_ema=int(params.get("fast_ema", 20)),
-            slow_ema=int(params.get("slow_ema", 60)),
-            bb_len=int(params.get("bb_len", 20)),
-            bb_mult=float(params.get("bb_mult", 2.0)),
-            breakout_window=int(params.get("breakout_window", 18)),
-            reset_window=int(params.get("reset_window", 8)),
-            atr_window=int(params.get("atr_window", 14)),
-            atr_mult=float(params.get("atr_mult", 2.1)),
-            volume_window=int(params.get("volume_window", 20)),
-            volume_threshold=float(params.get("volume_threshold", 1.0)),
-            spike_window=int(params.get("spike_window", 24)),
-            spike_quantile=float(params.get("spike_quantile", 0.7)),
+            fast_ema=int(params.get("fast_ema", VOLATILITY_RESET_BREAKOUT_DEFAULTS["fast_ema"])),
+            slow_ema=int(params.get("slow_ema", VOLATILITY_RESET_BREAKOUT_DEFAULTS["slow_ema"])),
+            bb_len=int(params.get("bb_len", VOLATILITY_RESET_BREAKOUT_DEFAULTS["bb_len"])),
+            bb_mult=float(params.get("bb_mult", VOLATILITY_RESET_BREAKOUT_DEFAULTS["bb_mult"])),
+            breakout_window=int(params.get("breakout_window", VOLATILITY_RESET_BREAKOUT_DEFAULTS["breakout_window"])),
+            reset_window=int(params.get("reset_window", VOLATILITY_RESET_BREAKOUT_DEFAULTS["reset_window"])),
+            atr_window=int(params.get("atr_window", VOLATILITY_RESET_BREAKOUT_DEFAULTS["atr_window"])),
+            atr_mult=float(params.get("atr_mult", VOLATILITY_RESET_BREAKOUT_DEFAULTS["atr_mult"])),
+            volume_window=int(params.get("volume_window", VOLATILITY_RESET_BREAKOUT_DEFAULTS["volume_window"])),
+            volume_threshold=float(params.get("volume_threshold", VOLATILITY_RESET_BREAKOUT_DEFAULTS["volume_threshold"])),
+            spike_window=int(params.get("spike_window", VOLATILITY_RESET_BREAKOUT_DEFAULTS["spike_window"])),
+            spike_quantile=float(params.get("spike_quantile", VOLATILITY_RESET_BREAKOUT_DEFAULTS["spike_quantile"])),
         )
 
     if strategy_name == "regime_blend":

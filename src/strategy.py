@@ -853,21 +853,37 @@ def build_squeeze_breakout_signals(
     return df
 
 
+VOLATILITY_RESET_BREAKOUT_DEFAULTS: dict[str, float | int] = {
+    "fast_ema": 12,
+    "slow_ema": 48,
+    "bb_len": 25,
+    "bb_mult": 2.080585227041821,
+    "breakout_window": 15,
+    "reset_window": 3,
+    "atr_window": 12,
+    "atr_mult": 1.5324845100670808,
+    "volume_window": 25,
+    "volume_threshold": 0.9680195784380248,
+    "spike_window": 22,
+    "spike_quantile": 0.9118428545070741,
+}
+
+
 def build_volatility_reset_breakout_signals(
     raw: pd.DataFrame,
     *,
-    fast_ema: int = 20,
-    slow_ema: int = 60,
-    bb_len: int = 20,
-    bb_mult: float = 2.0,
-    breakout_window: int = 18,
-    reset_window: int = 8,
-    atr_window: int = 14,
-    atr_mult: float = 2.1,
-    volume_window: int = 20,
-    volume_threshold: float = 1.0,
-    spike_window: int = 24,
-    spike_quantile: float = 0.7,
+    fast_ema: int = int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["fast_ema"]),
+    slow_ema: int = int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["slow_ema"]),
+    bb_len: int = int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["bb_len"]),
+    bb_mult: float = float(VOLATILITY_RESET_BREAKOUT_DEFAULTS["bb_mult"]),
+    breakout_window: int = int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["breakout_window"]),
+    reset_window: int = int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["reset_window"]),
+    atr_window: int = int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["atr_window"]),
+    atr_mult: float = float(VOLATILITY_RESET_BREAKOUT_DEFAULTS["atr_mult"]),
+    volume_window: int = int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["volume_window"]),
+    volume_threshold: float = float(VOLATILITY_RESET_BREAKOUT_DEFAULTS["volume_threshold"]),
+    spike_window: int = int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["spike_window"]),
+    spike_quantile: float = float(VOLATILITY_RESET_BREAKOUT_DEFAULTS["spike_quantile"]),
 ) -> pd.DataFrame:
     required = {"open", "high", "low", "close", "volume"}
     if not required.issubset(raw.columns):

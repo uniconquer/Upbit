@@ -4,6 +4,7 @@ import random
 
 import pandas as pd
 
+from src.strategy import VOLATILITY_RESET_BREAKOUT_DEFAULTS
 from src.strategy_lab import (
     CandidateResult,
     CandidateSpec,
@@ -49,6 +50,8 @@ def test_seed_candidates_contains_improve_and_invent_tracks():
         "lab_range_rebound_v1",
         "lab_regime_switch_v1",
     }
+    volatility_seed = next(candidate for candidate in seeds if candidate.strategy_name == "volatility_reset_breakout")
+    assert volatility_seed.params == VOLATILITY_RESET_BREAKOUT_DEFAULTS
 
 
 def test_mutate_candidate_preserves_family_and_advances_generation():
