@@ -103,6 +103,19 @@ def test_strategy_options_include_rsi_trend_guard():
     ]
 
 
+def test_strategy_options_can_include_backtest_extras_without_affecting_live_defaults():
+    options = strategy_options(flux_available=False, flux_ema_available=False, include_backtest_extras=True)
+
+    assert options == [
+        "research_trend",
+        "rsi_bb_double_bottom",
+        "rsi_trend_guard",
+        "relative_strength_rotation",
+        "relative_strength_guard",
+        "regime_blend_guard",
+    ]
+
+
 def test_build_strategy_frame_relative_strength_rotation_uses_shared_builder():
     frame = build_strategy_frame(
         _sample_ohlcv(),
@@ -124,6 +137,89 @@ def test_build_strategy_frame_relative_strength_rotation_uses_shared_builder():
     assert {"rs_short", "rs_mid", "rs_long", "trend_ema", "atr_stop", "strategy_score"}.issubset(frame.columns)
     assert frame["buy_signal"].dtype == bool
     assert frame["sell_signal"].dtype == bool
+
+
+def test_build_strategy_frame_relative_strength_guard_uses_shared_builder():
+    frame = build_strategy_frame(
+        _sample_ohlcv(),
+        strategy_name="relative_strength_guard",
+        params={
+            "rs_short_window": 2,
+            "rs_mid_window": 3,
+            "rs_long_window": 5,
+            "trend_ema_window": 4,
+            "breakout_window": 3,
+            "atr_window": 3,
+            "atr_mult": 1.8,
+            "volume_window": 3,
+            "entry_score": 0.5,
+            "exit_score": -0.5,
+            "guard_fast_ema": 4,
+            "guard_slow_ema": 10,
+            "guard_buffer_pct": 0.5,
+            "guard_adx_window": 3,
+            "guard_adx_floor": 8.0,
+            "guard_rs_floor": 0.0,
+        },
+    )
+
+    assert {"guard_fast_ema", "guard_slow_ema", "guard_adx", "bearish_regime", "risk_on_regime"}.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+
+
+def test_build_strategy_frame_volatility_reset_breakout_uses_shared_builder():
+    closes = [
+        100, 101, 102, 103, 104, 105, 106, 107, 109, 111,
+        113, 116, 118, 120, 123, 125, 127, 129, 128, 126,
+        131, 124, 135, 127, 136, 130, 137, 141, 145, 150,
+    ]
+    opens = [99] + closes[:-1]
+    highs = []
+    lows = []
+    for idx, (open_, close) in enumerate(zip(opens, closes, strict=False)):
+        if 18 <= idx <= 23:
+            highs.append(max(open_, close) + 8.0)
+            lows.append(min(open_, close) - 8.0)
+        elif 24 <= idx <= 26:
+            highs.append(max(open_, close) + 2.0)
+            lows.append(min(open_, close) - 2.0)
+        else:
+            highs.append(max(open_, close) + 1.1)
+            lows.append(min(open_, close) - 1.1)
+    frame = pd.DataFrame(
+        {
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": [900 + (idx * 30) for idx, _ in enumerate(closes)],
+        },
+        index=pd.date_range("2026-04-10", periods=len(closes), freq="1h"),
+    )
+    frame.iloc[22:, frame.columns.get_loc("volume")] = [1800, 2100, 2400, 2500, 2600, 2800, 3000, 3200]
+
+    result = build_strategy_frame(
+        frame,
+        strategy_name="volatility_reset_breakout",
+        params={
+            "fast_ema": 3,
+            "slow_ema": 6,
+            "bb_len": 5,
+            "breakout_window": 4,
+            "reset_window": 3,
+            "atr_window": 3,
+            "volume_window": 4,
+            "volume_threshold": 0.9,
+            "spike_window": 5,
+            "spike_quantile": 0.6,
+        },
+    )
+
+    assert {"ema_fast", "ema_slow", "atr_ratio", "spike_recent", "cooling_recent", "reclaim_high", "strategy_score"}.issubset(result.columns)
+    assert result["buy_signal"].dtype == bool
+    assert result["sell_signal"].dtype == bool
+    assert int(result["buy_signal"].sum()) >= 1
 
 
 def test_build_strategy_frame_ema_pullback_uses_shared_builder():
@@ -316,6 +412,58 @@ def test_build_strategy_frame_regime_blend_uses_shared_builder():
     assert result["buy_signal"].dtype == bool
     assert result["sell_signal"].dtype == bool
     assert result["trend_regime"].dtype == bool
+
+
+def test_build_strategy_frame_regime_blend_guard_uses_shared_builder():
+    closes = [
+        120, 119, 118, 117, 116, 115, 114, 113, 112, 111,
+        109, 107, 105, 103, 101, 99, 97, 95, 93, 91,
+        89, 87, 86, 88, 92, 95, 93, 91, 90, 92,
+        95, 98, 101, 105, 109, 113, 117, 121, 125, 129,
+    ]
+    frame = pd.DataFrame(
+        {
+            "open": [121] + closes[:-1],
+            "high": [value + 1.5 for value in closes],
+            "low": [value - 1.5 for value in closes],
+            "close": closes,
+            "volume": [1000 + idx * 20 for idx, _ in enumerate(closes)],
+        },
+        index=pd.date_range("2026-02-01", periods=len(closes), freq="1h"),
+    )
+
+    result = build_strategy_frame(
+        frame,
+        strategy_name="regime_blend_guard",
+        params={
+            "trend_fast_ema": 4,
+            "trend_slow_ema": 8,
+            "trend_breakout_window": 6,
+            "trend_exit_window": 4,
+            "trend_atr_window": 5,
+            "trend_atr_mult": 2.0,
+            "trend_adx_window": 5,
+            "trend_adx_threshold": 10.0,
+            "trend_momentum_window": 4,
+            "trend_volume_window": 4,
+            "trend_volume_threshold": 0.8,
+            "rsi_len": 8,
+            "oversold": 38.0,
+            "bb_len": 10,
+            "bb_mult": 1.4,
+            "max_setup_bars": 12,
+            "confirm_bars": 8,
+            "use_macd_filter": False,
+            "regime_adx_floor": 8.0,
+            "bear_guard_buffer_pct": 0.5,
+            "bear_guard_adx_floor": 8.0,
+            "bear_guard_score_floor": 0.0,
+        },
+    )
+
+    assert {"bearish_regime", "risk_on_regime", "bear_guard_slow_slope", "base_entry_mode"}.issubset(result.columns)
+    assert result["buy_signal"].dtype == bool
+    assert result["sell_signal"].dtype == bool
 
 
 def test_build_strategy_frame_flux_ema_filter_uses_combo_signals():

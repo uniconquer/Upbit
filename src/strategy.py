@@ -347,6 +347,104 @@ def build_relative_strength_rotation_signals(
     return df
 
 
+def _bearish_regime_filter(
+    close: pd.Series,
+    fast_line: pd.Series,
+    slow_line: pd.Series,
+    *,
+    buffer_pct: float = 0.0,
+    slope_window: int = 4,
+    adx: pd.Series | None = None,
+    adx_floor: float | None = None,
+    momentum: pd.Series | None = None,
+    momentum_floor: float | None = None,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    slow_buffer = 1.0 - (max(float(buffer_pct), 0.0) / 100.0)
+    resolved_slope_window = max(int(slope_window), 2)
+    slow_slope = (slow_line.pct_change(resolved_slope_window) * 100.0).fillna(0.0)
+
+    confirmations = pd.Series(False, index=close.index, dtype=bool)
+    confirmations |= slow_slope < 0.0
+
+    if adx is not None and adx_floor is not None:
+        confirmations |= pd.to_numeric(adx, errors="coerce").fillna(0.0) >= float(adx_floor)
+
+    if momentum is not None and momentum_floor is not None:
+        confirmations |= pd.to_numeric(momentum, errors="coerce").fillna(0.0) <= float(momentum_floor)
+
+    bearish_regime = (
+        (close < (slow_line * slow_buffer))
+        & (fast_line < slow_line)
+        & confirmations
+    ).fillna(False)
+    risk_on_regime = (~bearish_regime).astype(bool)
+    return bearish_regime, risk_on_regime, slow_slope
+
+
+def build_relative_strength_guard_signals(
+    raw: pd.DataFrame,
+    *,
+    rs_short_window: int = 10,
+    rs_mid_window: int = 30,
+    rs_long_window: int = 90,
+    trend_ema_window: int = 55,
+    breakout_window: int = 28,
+    atr_window: int = 14,
+    atr_mult: float = 2.2,
+    volume_window: int = 20,
+    volume_threshold: float = 0.9,
+    entry_score: float = 9.0,
+    exit_score: float = 3.0,
+    guard_fast_ema: int = 13,
+    guard_slow_ema: int = 144,
+    guard_buffer_pct: float = 1.0,
+    guard_adx_window: int = 14,
+    guard_adx_floor: float = 10.0,
+    guard_rs_floor: float = -3.0,
+) -> pd.DataFrame:
+    df = build_relative_strength_rotation_signals(
+        raw,
+        rs_short_window=rs_short_window,
+        rs_mid_window=rs_mid_window,
+        rs_long_window=rs_long_window,
+        trend_ema_window=trend_ema_window,
+        breakout_window=breakout_window,
+        atr_window=atr_window,
+        atr_mult=atr_mult,
+        volume_window=volume_window,
+        volume_threshold=volume_threshold,
+        entry_score=entry_score,
+        exit_score=exit_score,
+    )
+
+    close = df["close"].astype(float)
+    df["guard_fast_ema"] = ema(close, guard_fast_ema)
+    df["guard_slow_ema"] = ema(close, guard_slow_ema)
+    df["guard_adx"] = average_directional_index(df, guard_adx_window)
+    bearish_regime, risk_on_regime, slow_slope = _bearish_regime_filter(
+        close,
+        df["guard_fast_ema"],
+        df["guard_slow_ema"],
+        buffer_pct=guard_buffer_pct,
+        slope_window=max(2, guard_slow_ema // 8),
+        adx=df["guard_adx"],
+        adx_floor=guard_adx_floor,
+        momentum=df["rs_long"],
+        momentum_floor=guard_rs_floor,
+    )
+
+    df["bearish_regime"] = bearish_regime
+    df["risk_on_regime"] = risk_on_regime
+    df["guard_slow_slope"] = slow_slope
+    df["base_buy_signal"] = df["buy_signal"].astype(bool)
+    df["base_sell_signal"] = df["sell_signal"].astype(bool)
+    bearish_exit_signal = bearish_regime & (~bearish_regime.shift(1, fill_value=False))
+    df["strategy_score"] = pd.to_numeric(df["strategy_score"], errors="coerce").fillna(0.0) + (risk_on_regime.astype(float) * 0.5)
+    df["buy_signal"] = df["base_buy_signal"] & risk_on_regime
+    df["sell_signal"] = df["base_sell_signal"] | bearish_exit_signal
+    return df
+
+
 def _infer_price_tick(raw: pd.DataFrame) -> float:
     values = pd.concat(
         [
@@ -755,6 +853,76 @@ def build_squeeze_breakout_signals(
     return df
 
 
+def build_volatility_reset_breakout_signals(
+    raw: pd.DataFrame,
+    *,
+    fast_ema: int = 20,
+    slow_ema: int = 60,
+    bb_len: int = 20,
+    bb_mult: float = 2.0,
+    breakout_window: int = 18,
+    reset_window: int = 8,
+    atr_window: int = 14,
+    atr_mult: float = 2.1,
+    volume_window: int = 20,
+    volume_threshold: float = 1.0,
+    spike_window: int = 24,
+    spike_quantile: float = 0.7,
+) -> pd.DataFrame:
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(raw.columns):
+        missing = ", ".join(sorted(required - set(raw.columns)))
+        raise ValueError(f"raw data missing columns: {missing}")
+
+    df = raw.copy()
+    close = df["close"].astype(float)
+
+    df["ema_fast"] = ema(close, fast_ema)
+    df["ema_slow"] = ema(close, slow_ema)
+    df["atr"] = average_true_range(df, atr_window)
+    bb_basis, bb_upper, bb_lower = bollinger_bands(close, bb_len, bb_mult)
+    df["bb_basis"] = bb_basis
+    df["bb_upper"] = bb_upper
+    df["bb_lower"] = bb_lower
+    df["bandwidth"] = ((bb_upper - bb_lower) / bb_basis.replace(0.0, np.nan)) * 100.0
+    df["volume_ratio"] = df["volume"] / df["volume"].rolling(volume_window).mean().replace(0.0, np.nan)
+    df["atr_ratio"] = df["atr"] / df["atr"].rolling(max(5, spike_window // 2)).mean().replace(0.0, np.nan)
+    df["breakout_high"] = df["high"].rolling(breakout_window).max().shift(1)
+    df["reset_low"] = df["low"].rolling(max(3, reset_window)).min().shift(1)
+    df["atr_stop"] = df["ema_slow"] - (atr_mult * df["atr"])
+
+    bandwidth_ref = df["bandwidth"].rolling(spike_window, min_periods=max(5, spike_window // 2)).quantile(spike_quantile).shift(1)
+    bandwidth_mean = df["bandwidth"].rolling(spike_window, min_periods=max(5, spike_window // 2)).mean().shift(1)
+    spike_on = (df["bandwidth"] >= bandwidth_ref) | (df["atr_ratio"] >= 1.2)
+    spike_recent = spike_on.rolling(reset_window, min_periods=1).max().astype(bool)
+    cooling = (df["bandwidth"] <= bandwidth_mean * 0.9) | (df["bandwidth"] < df["bandwidth"].shift(1))
+    cooling_recent = cooling.rolling(reset_window, min_periods=1).max().astype(bool)
+
+    trend_ok = (close > df["ema_slow"]) & (df["ema_fast"] > df["ema_slow"]) & (df["ema_slow"] > df["ema_slow"].shift(max(2, slow_ema // 5)))
+    reclaim = (close > df["breakout_high"]) & (close > df["ema_fast"])
+    volume_ok = df["volume_ratio"].fillna(1.0) >= volume_threshold
+
+    trend_gap = ((close / df["ema_slow"]) - 1.0) * 100.0
+    reset_gap = (bandwidth_mean - df["bandwidth"]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    spike_gap = (df["atr_ratio"] - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df["strategy_score"] = (
+        spike_gap * 14.0
+        + reset_gap * 2.5
+        + trend_gap.fillna(0.0) * 1.6
+        + (df["volume_ratio"].fillna(1.0) - 1.0) * 6.0
+    )
+
+    raw_buy = trend_ok & spike_recent & cooling_recent & reclaim & volume_ok
+    raw_sell = (close < df["ema_slow"]) | (close < df["atr_stop"]) | (close < df["reset_low"])
+
+    df["spike_recent"] = spike_recent
+    df["cooling_recent"] = cooling_recent
+    df["reclaim_high"] = df["breakout_high"]
+    df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
+    df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
 def build_regime_blend_signals(
     raw: pd.DataFrame,
     *,
@@ -866,6 +1034,92 @@ def build_regime_blend_signals(
     df["entry_mode"] = pd.Series(mode_trace, index=df.index, dtype="string")
     df["buy_signal"] = buy_signal
     df["sell_signal"] = sell_signal
+    return df
+
+
+def build_regime_blend_guard_signals(
+    raw: pd.DataFrame,
+    *,
+    trend_fast_ema: int = 21,
+    trend_slow_ema: int = 55,
+    trend_breakout_window: int = 20,
+    trend_exit_window: int = 10,
+    trend_atr_window: int = 14,
+    trend_atr_mult: float = 2.5,
+    trend_adx_window: int = 14,
+    trend_adx_threshold: float = 18.0,
+    trend_momentum_window: int = 20,
+    trend_volume_window: int = 20,
+    trend_volume_threshold: float = 0.9,
+    rsi_len: int = 10,
+    oversold: float = 35.0,
+    bb_len: int = 20,
+    bb_mult: float = 2.0,
+    min_down_bars: int = 2,
+    low_tolerance_pct: float = 1.0,
+    max_setup_bars: int = 12,
+    confirm_bars: int = 5,
+    use_macd_filter: bool = True,
+    macd_lookback: int = 5,
+    risk_reward: float = 1.5,
+    stop_buffer_ticks: int = 2,
+    regime_adx_floor: float = 16.0,
+    bear_guard_buffer_pct: float = 1.5,
+    bear_guard_adx_floor: float = 14.0,
+    bear_guard_score_floor: float = -2.0,
+) -> pd.DataFrame:
+    df = build_regime_blend_signals(
+        raw,
+        trend_fast_ema=trend_fast_ema,
+        trend_slow_ema=trend_slow_ema,
+        trend_breakout_window=trend_breakout_window,
+        trend_exit_window=trend_exit_window,
+        trend_atr_window=trend_atr_window,
+        trend_atr_mult=trend_atr_mult,
+        trend_adx_window=trend_adx_window,
+        trend_adx_threshold=trend_adx_threshold,
+        trend_momentum_window=trend_momentum_window,
+        trend_volume_window=trend_volume_window,
+        trend_volume_threshold=trend_volume_threshold,
+        rsi_len=rsi_len,
+        oversold=oversold,
+        bb_len=bb_len,
+        bb_mult=bb_mult,
+        min_down_bars=min_down_bars,
+        low_tolerance_pct=low_tolerance_pct,
+        max_setup_bars=max_setup_bars,
+        confirm_bars=confirm_bars,
+        use_macd_filter=use_macd_filter,
+        macd_lookback=macd_lookback,
+        risk_reward=risk_reward,
+        stop_buffer_ticks=stop_buffer_ticks,
+        regime_adx_floor=regime_adx_floor,
+    )
+
+    close = df["close"].astype(float)
+    bearish_regime, risk_on_regime, slow_slope = _bearish_regime_filter(
+        close,
+        df["ema_fast"],
+        df["ema_slow"],
+        buffer_pct=bear_guard_buffer_pct,
+        slope_window=max(2, trend_slow_ema // 6),
+        adx=df["adx"],
+        adx_floor=bear_guard_adx_floor,
+        momentum=df["trend_score"],
+        momentum_floor=bear_guard_score_floor,
+    )
+
+    df["bearish_regime"] = bearish_regime
+    df["risk_on_regime"] = risk_on_regime
+    df["bear_guard_slow_slope"] = slow_slope
+    df["base_buy_signal"] = df["buy_signal"].astype(bool)
+    df["base_sell_signal"] = df["sell_signal"].astype(bool)
+    df["base_entry_mode"] = df["entry_mode"].astype("string")
+    bearish_exit_signal = bearish_regime & (~bearish_regime.shift(1, fill_value=False))
+    df["trend_regime"] = df["trend_regime"].astype(bool) & risk_on_regime
+    df["strategy_score"] = pd.to_numeric(df["strategy_score"], errors="coerce").fillna(0.0) + (risk_on_regime.astype(float) * 0.5)
+    df["buy_signal"] = df["base_buy_signal"] & risk_on_regime
+    df["sell_signal"] = df["base_sell_signal"] | bearish_exit_signal
     return df
 
 
@@ -1034,6 +1288,7 @@ STRATEGY_HELP = {
     "rsi": "RSI oversold/overbought crossback",
     "research_trend": "EMA trend + breakout + ADX + ATR exit",
     "rsi_bb_double_bottom": "RSI oversold + Bollinger lower band + second-bottom rebound",
+    "volatility_reset_breakout": "Volatility spike, cooldown, then reclaim breakout",
 }
 
 
@@ -1048,6 +1303,7 @@ __all__ = [
     "build_relative_strength_rotation_signals",
     "build_research_trend_signals",
     "build_rsi_bb_double_bottom_signals",
+    "build_volatility_reset_breakout_signals",
     "ema",
     "ema_cross_signals",
     "extract_backtest_trade_events",

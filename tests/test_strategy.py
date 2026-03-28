@@ -8,11 +8,14 @@ from src.strategy import (
     backtest_signal_frame,
     build_ema_pullback_signals,
     build_regime_blend_signals,
+    build_regime_blend_guard_signals,
     build_research_trend_signals,
     build_relative_strength_rotation_signals,
+    build_relative_strength_guard_signals,
     build_rsi_bb_double_bottom_signals,
     build_rsi_trend_guard_signals,
     build_squeeze_breakout_signals,
+    build_volatility_reset_breakout_signals,
     extract_backtest_trade_events,
     parameter_grid_size,
     rsi_signals,
@@ -94,6 +97,61 @@ def _squeeze_breakout_ohlcv() -> pd.DataFrame:
     return frame
 
 
+def _volatility_reset_breakout_ohlcv() -> pd.DataFrame:
+    closes = [
+        100, 101, 102, 103, 104, 105, 106, 107, 109, 111,
+        113, 116, 118, 120, 123, 125, 127, 129, 128, 126,
+        131, 124, 135, 127, 136, 130, 137, 141, 145, 150,
+    ]
+    opens = [99] + closes[:-1]
+    highs: list[float] = []
+    lows: list[float] = []
+    for idx, (open_, close) in enumerate(zip(opens, closes, strict=False)):
+        if 18 <= idx <= 23:
+            highs.append(max(open_, close) + 8.0)
+            lows.append(min(open_, close) - 8.0)
+        elif 24 <= idx <= 26:
+            highs.append(max(open_, close) + 2.0)
+            lows.append(min(open_, close) - 2.0)
+        else:
+            highs.append(max(open_, close) + 1.1)
+            lows.append(min(open_, close) - 1.1)
+    frame = pd.DataFrame(
+        {
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": [900 + (idx * 30) for idx, _ in enumerate(closes)],
+        }
+    )
+    frame.loc[22:, "volume"] = [1800, 2100, 2400, 2500, 2600, 2800, 3000, 3200]
+    frame.index = pd.date_range("2026-04-10", periods=len(frame), freq="1h")
+    return frame
+
+
+def _rotation_rebound_ohlcv() -> pd.DataFrame:
+    closes = [
+        220, 218, 216, 214, 212, 210, 208, 206, 204, 202,
+        200, 198, 196, 194, 192, 190, 188, 186, 184, 182,
+        180, 178, 176, 174, 172, 170, 168, 166, 164, 162,
+        160, 162, 164, 166, 168, 170, 172, 174, 176, 178,
+        181, 184, 187, 191, 195, 200, 206, 212, 218, 224,
+    ]
+    opens = [221] + closes[:-1]
+    frame = pd.DataFrame(
+        {
+            "open": opens,
+            "high": [max(o, c) + 1.2 for o, c in zip(opens, closes)],
+            "low": [min(o, c) - 1.2 for o, c in zip(opens, closes)],
+            "close": closes,
+            "volume": [900 + idx * 25 for idx, _ in enumerate(closes)],
+        }
+    )
+    frame.index = pd.date_range("2026-04-01", periods=len(frame), freq="1h")
+    return frame
+
+
 def test_no_signals_if_short_ge_long():
     try:
         sma_cross_signals([1, 2, 3, 4, 5, 6], short=5, long=5)
@@ -160,6 +218,56 @@ def test_relative_strength_rotation_frame_contains_expected_columns():
     assert expected.issubset(frame.columns)
     assert frame["buy_signal"].dtype == bool
     assert frame["sell_signal"].dtype == bool
+
+
+def test_relative_strength_guard_adds_regime_columns_and_blocks_bear_entries():
+    base = build_relative_strength_rotation_signals(
+        _rotation_rebound_ohlcv(),
+        rs_short_window=2,
+        rs_mid_window=4,
+        rs_long_window=8,
+        trend_ema_window=6,
+        breakout_window=3,
+        atr_window=4,
+        volume_window=4,
+        volume_threshold=0.8,
+        entry_score=0.1,
+        exit_score=-2.0,
+    )
+    guard = build_relative_strength_guard_signals(
+        _rotation_rebound_ohlcv(),
+        rs_short_window=2,
+        rs_mid_window=4,
+        rs_long_window=8,
+        trend_ema_window=6,
+        breakout_window=3,
+        atr_window=4,
+        volume_window=4,
+        volume_threshold=0.8,
+        entry_score=0.1,
+        exit_score=-2.0,
+        guard_fast_ema=8,
+        guard_slow_ema=21,
+        guard_buffer_pct=0.5,
+        guard_adx_window=4,
+        guard_adx_floor=8.0,
+        guard_rs_floor=0.0,
+    )
+
+    expected = {
+        "guard_fast_ema",
+        "guard_slow_ema",
+        "guard_adx",
+        "guard_slow_slope",
+        "bearish_regime",
+        "risk_on_regime",
+        "base_buy_signal",
+        "base_sell_signal",
+    }
+    assert expected.issubset(guard.columns)
+    assert int(base["buy_signal"].sum()) >= 1
+    assert int(guard["buy_signal"].sum()) == 0
+    assert guard["bearish_regime"].any()
 
 
 def test_ema_pullback_frame_contains_expected_columns_and_signal():
@@ -262,6 +370,43 @@ def test_squeeze_breakout_frame_contains_expected_columns_and_signal():
     assert int(frame["buy_signal"].sum()) >= 1
 
 
+def test_volatility_reset_breakout_frame_contains_expected_columns_and_signal():
+    frame = build_volatility_reset_breakout_signals(
+        _volatility_reset_breakout_ohlcv(),
+        fast_ema=3,
+        slow_ema=6,
+        bb_len=5,
+        breakout_window=4,
+        reset_window=3,
+        atr_window=3,
+        volume_window=4,
+        volume_threshold=0.9,
+        spike_window=5,
+        spike_quantile=0.6,
+    )
+
+    expected = {
+        "ema_fast",
+        "ema_slow",
+        "atr",
+        "bb_basis",
+        "bb_upper",
+        "bb_lower",
+        "bandwidth",
+        "atr_ratio",
+        "spike_recent",
+        "cooling_recent",
+        "reclaim_high",
+        "strategy_score",
+        "buy_signal",
+        "sell_signal",
+    }
+    assert expected.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+    assert int(frame["buy_signal"].sum()) >= 1
+
+
 def test_regime_blend_frame_contains_expected_columns_and_both_modes():
     frame = build_regime_blend_signals(
         _double_bottom_ohlcv(),
@@ -312,6 +457,50 @@ def test_regime_blend_frame_contains_expected_columns_and_both_modes():
     assert frame["trend_regime"].any()
     assert (~frame["trend_regime"]).any()
     assert int(frame["buy_signal"].sum()) >= 1
+
+
+def test_regime_blend_guard_adds_bearish_filter_columns():
+    frame = build_regime_blend_guard_signals(
+        _double_bottom_ohlcv(),
+        trend_fast_ema=4,
+        trend_slow_ema=8,
+        trend_breakout_window=6,
+        trend_exit_window=4,
+        trend_atr_window=5,
+        trend_atr_mult=2.0,
+        trend_adx_window=5,
+        trend_adx_threshold=10.0,
+        trend_momentum_window=4,
+        trend_volume_window=4,
+        trend_volume_threshold=0.8,
+        rsi_len=8,
+        oversold=38.0,
+        bb_len=10,
+        bb_mult=1.4,
+        min_down_bars=2,
+        low_tolerance_pct=1.5,
+        max_setup_bars=12,
+        confirm_bars=8,
+        use_macd_filter=False,
+        risk_reward=1.2,
+        regime_adx_floor=8.0,
+        bear_guard_buffer_pct=0.5,
+        bear_guard_adx_floor=8.0,
+        bear_guard_score_floor=0.0,
+    )
+
+    expected = {
+        "bearish_regime",
+        "risk_on_regime",
+        "bear_guard_slow_slope",
+        "base_buy_signal",
+        "base_sell_signal",
+        "base_entry_mode",
+    }
+    assert expected.issubset(frame.columns)
+    assert frame["buy_signal"].dtype == bool
+    assert frame["sell_signal"].dtype == bool
+    assert frame["risk_on_regime"].dtype == bool
 
 
 def test_rsi_trend_guard_adds_bearish_filter_columns():

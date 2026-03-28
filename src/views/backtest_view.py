@@ -455,7 +455,11 @@ def _present_sweep_results(results: pd.DataFrame, strategy_name: str) -> pd.Data
 
 
 def _strategy_controls_from_schema() -> tuple[str, dict[str, float | int | str]]:
-    options = strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
+    options = strategy_options(
+        flux_indicator is not None,
+        flux_indicator_with_ema is not None,
+        include_backtest_extras=True,
+    )
     current = st.session_state.get("bt_strategy_name", options[0])
     index = options.index(current) if current in options else 0
     strategy_name = st.selectbox(
@@ -558,9 +562,10 @@ def _present_sweep_results_from_schema(results: pd.DataFrame, strategy_name: str
 def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, object]):
     is_research = strategy_name == "research_trend"
     is_double_bottom = strategy_name in DOUBLE_BOTTOM_STRATEGIES
-    is_rotation = strategy_name == "relative_strength_rotation"
-    rows = 4 if (is_research or is_rotation or is_double_bottom) else 3
-    row_heights = [0.56, 0.16, 0.14, 0.14] if (is_research or is_rotation or is_double_bottom) else [0.64, 0.18, 0.18]
+    is_rotation = strategy_name in {"relative_strength_rotation", "relative_strength_guard"}
+    is_blend = strategy_name == "regime_blend_guard"
+    rows = 4 if (is_research or is_rotation or is_double_bottom or is_blend) else 3
+    row_heights = [0.56, 0.16, 0.14, 0.14] if (is_research or is_rotation or is_double_bottom or is_blend) else [0.64, 0.18, 0.18]
     figure = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=row_heights, vertical_spacing=0.03)
     figure.add_trace(
         go.Candlestick(
@@ -662,6 +667,8 @@ def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, 
             ("trend_ema", "#fde047"),
             ("atr_stop", "#fb7185"),
             ("breakout_high", "rgba(45, 212, 191, 0.40)"),
+            ("guard_fast_ema", "#60a5fa"),
+            ("guard_slow_ema", "#f59e0b"),
         ]:
             if column in frame:
                 figure.add_trace(
@@ -675,6 +682,47 @@ def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, 
                     col=1,
                 )
         figure.add_trace(go.Bar(x=frame.index, y=frame["volume"], name="거래량", marker_color="rgba(96,165,250,0.55)"), row=3, col=1)
+        if "strategy_score" in frame:
+            figure.add_trace(
+                go.Scatter(
+                    x=frame.index,
+                    y=frame["strategy_score"],
+                    name=_SERIES_LABELS.get("strategy_score", "전략 점수"),
+                    line={"color": "#2dd4bf", "width": 1.6},
+                ),
+                row=4,
+                col=1,
+            )
+    elif is_blend:
+        for column, color in [
+            ("ema_fast", "#60a5fa"),
+            ("ema_slow", "#f59e0b"),
+            ("atr_stop", "#fb7185"),
+            ("trade_stop", "rgba(248, 113, 113, 0.70)"),
+            ("take_profit", "rgba(34, 197, 94, 0.70)"),
+        ]:
+            if column in frame:
+                figure.add_trace(
+                    go.Scatter(
+                        x=frame.index,
+                        y=frame[column],
+                        name=_SERIES_LABELS.get(column, column),
+                        line={"color": color, "width": 1.4},
+                    ),
+                    row=1,
+                    col=1,
+                )
+        if "adx" in frame:
+            figure.add_trace(
+                go.Scatter(
+                    x=frame.index,
+                    y=frame["adx"],
+                    name=_SERIES_LABELS.get("adx", "ADX"),
+                    line={"color": "#a78bfa", "width": 1.6},
+                ),
+                row=3,
+                col=1,
+            )
         if "strategy_score" in frame:
             figure.add_trace(
                 go.Scatter(
@@ -941,12 +989,23 @@ def render_backtest():
                 "volume_ratio": "거래량 비율",
                 "buy_signal": "매수 신호",
                 "sell_signal": "매도 신호",
+                "guard_fast_ema": "가드 빠른 EMA",
+                "guard_slow_ema": "가드 느린 EMA",
+                "guard_adx": "가드 ADX",
+                "risk_on_regime": "리스크 온",
+                "guard_slow_slope": "가드 EMA 기울기",
                 "ema_fast": "빠른 EMA",
                 "ema_slow": "느린 EMA",
                 "adx": "ADX",
                 "atr": "ATR",
                 "bearish_regime": "약세 가드",
                 "trend_filter": "추세 통과",
+                "trend_regime": "추세 장세",
+                "trend_score": "추세 점수",
+                "range_score": "반등 점수",
+                "entry_mode": "현재 진입 모드",
+                "base_entry_mode": "원본 진입 모드",
+                "bear_guard_slow_slope": "가드 EMA 기울기",
                 "strength": "필터 강도",
                 "ema_buy": "EMA 매수 확인",
                 "ema_sell": "EMA 매도 확인",
@@ -968,7 +1027,11 @@ def render_backtest():
                         raw_frame,
                         strategies=[
                             {"strategy_name": name, "params": _params_for_strategy(name)}
-                            for name in strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
+                            for name in strategy_options(
+                                flux_indicator is not None,
+                                flux_indicator_with_ema is not None,
+                                include_backtest_extras=True,
+                            )
                         ],
                         fee=fee,
                         slippage_bps=slippage_bps,

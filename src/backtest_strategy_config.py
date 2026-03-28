@@ -63,6 +63,54 @@ BACKTEST_DEFAULT_PARAMS: dict[str, dict[str, object]] = {
         "entry_score": 8.0,
         "exit_score": 2.0,
     },
+    "relative_strength_guard": {
+        "rs_short_window": 10,
+        "rs_mid_window": 30,
+        "rs_long_window": 90,
+        "trend_ema_window": 55,
+        "breakout_window": 28,
+        "atr_window": 14,
+        "atr_mult": 2.2,
+        "volume_window": 20,
+        "volume_threshold": 0.9,
+        "entry_score": 9.0,
+        "exit_score": 3.0,
+        "guard_fast_ema": 13,
+        "guard_slow_ema": 144,
+        "guard_buffer_pct": 1.0,
+        "guard_adx_window": 14,
+        "guard_adx_floor": 10.0,
+        "guard_rs_floor": -3.0,
+    },
+    "regime_blend_guard": {
+        "trend_fast_ema": 21,
+        "trend_slow_ema": 55,
+        "trend_breakout_window": 20,
+        "trend_exit_window": 10,
+        "trend_atr_window": 14,
+        "trend_atr_mult": 2.5,
+        "trend_adx_window": 14,
+        "trend_adx_threshold": 18.0,
+        "trend_momentum_window": 20,
+        "trend_volume_window": 20,
+        "trend_volume_threshold": 0.9,
+        "rsi_len": 10,
+        "oversold": 35.0,
+        "bb_len": 20,
+        "bb_mult": 2.0,
+        "min_down_bars": 2,
+        "low_tolerance_pct": 1.0,
+        "max_setup_bars": 12,
+        "confirm_bars": 5,
+        "use_macd_filter": True,
+        "macd_lookback": 5,
+        "risk_reward": 1.5,
+        "stop_buffer_ticks": 2,
+        "regime_adx_floor": 16.0,
+        "bear_guard_buffer_pct": 1.5,
+        "bear_guard_adx_floor": 14.0,
+        "bear_guard_score_floor": -2.0,
+    },
     "flux_trend": {
         "ltf_len": 20,
         "ltf_mult": 2.0,
@@ -144,6 +192,54 @@ BACKTEST_WIDGET_KEYS: dict[str, dict[str, str]] = {
         "entry_score": "bt_rs_entry_score",
         "exit_score": "bt_rs_exit_score",
     },
+    "relative_strength_guard": {
+        "rs_short_window": "bt_rs_guard_short_window",
+        "rs_mid_window": "bt_rs_guard_mid_window",
+        "rs_long_window": "bt_rs_guard_long_window",
+        "trend_ema_window": "bt_rs_guard_trend_ema_window",
+        "breakout_window": "bt_rs_guard_breakout_window",
+        "atr_window": "bt_rs_guard_atr_window",
+        "atr_mult": "bt_rs_guard_atr_mult",
+        "volume_window": "bt_rs_guard_volume_window",
+        "volume_threshold": "bt_rs_guard_volume_threshold",
+        "entry_score": "bt_rs_guard_entry_score",
+        "exit_score": "bt_rs_guard_exit_score",
+        "guard_fast_ema": "bt_rs_guard_fast_ema",
+        "guard_slow_ema": "bt_rs_guard_slow_ema",
+        "guard_buffer_pct": "bt_rs_guard_buffer_pct",
+        "guard_adx_window": "bt_rs_guard_adx_window",
+        "guard_adx_floor": "bt_rs_guard_adx_floor",
+        "guard_rs_floor": "bt_rs_guard_rs_floor",
+    },
+    "regime_blend_guard": {
+        "trend_fast_ema": "bt_blend_guard_trend_fast_ema",
+        "trend_slow_ema": "bt_blend_guard_trend_slow_ema",
+        "trend_breakout_window": "bt_blend_guard_breakout_window",
+        "trend_exit_window": "bt_blend_guard_exit_window",
+        "trend_atr_window": "bt_blend_guard_atr_window",
+        "trend_atr_mult": "bt_blend_guard_atr_mult",
+        "trend_adx_window": "bt_blend_guard_adx_window",
+        "trend_adx_threshold": "bt_blend_guard_adx_threshold",
+        "trend_momentum_window": "bt_blend_guard_momentum_window",
+        "trend_volume_window": "bt_blend_guard_volume_window",
+        "trend_volume_threshold": "bt_blend_guard_volume_threshold",
+        "rsi_len": "bt_blend_guard_rsi_len",
+        "oversold": "bt_blend_guard_oversold",
+        "bb_len": "bt_blend_guard_bb_len",
+        "bb_mult": "bt_blend_guard_bb_mult",
+        "min_down_bars": "bt_blend_guard_min_down_bars",
+        "low_tolerance_pct": "bt_blend_guard_low_tolerance_pct",
+        "max_setup_bars": "bt_blend_guard_max_setup_bars",
+        "confirm_bars": "bt_blend_guard_confirm_bars",
+        "use_macd_filter": "bt_blend_guard_use_macd_filter",
+        "macd_lookback": "bt_blend_guard_macd_lookback",
+        "risk_reward": "bt_blend_guard_risk_reward",
+        "stop_buffer_ticks": "bt_blend_guard_stop_buffer_ticks",
+        "regime_adx_floor": "bt_blend_guard_regime_adx_floor",
+        "bear_guard_buffer_pct": "bt_blend_guard_buffer_pct",
+        "bear_guard_adx_floor": "bt_blend_guard_bear_adx_floor",
+        "bear_guard_score_floor": "bt_blend_guard_score_floor",
+    },
     "flux_trend": {
         "ltf_len": "bt_flux_ltf_len",
         "ltf_mult": "bt_flux_ltf_mult",
@@ -210,6 +306,18 @@ def strategy_param_summary(strategy_name: str, params: dict[str, object]) -> str
         return (
             f"RS {int(params.get('rs_short_window', 10))}/{int(params.get('rs_mid_window', 30))}/{int(params.get('rs_long_window', 90))} · "
             f"EMA {int(params.get('trend_ema_window', 55))} · 진입 {float(params.get('entry_score', 8.0)):.1f}"
+        )
+    if strategy_name == "relative_strength_guard":
+        return (
+            f"RS {int(params.get('rs_short_window', 10))}/{int(params.get('rs_mid_window', 30))}/{int(params.get('rs_long_window', 90))} · "
+            f"가드 EMA {int(params.get('guard_fast_ema', 21))}/{int(params.get('guard_slow_ema', 144))} · "
+            f"가드 ADX {float(params.get('guard_adx_floor', 14.0)):.1f}"
+        )
+    if strategy_name == "regime_blend_guard":
+        return (
+            f"혼합 ADX {float(params.get('regime_adx_floor', 16.0)):.1f} · "
+            f"가드 버퍼 {float(params.get('bear_guard_buffer_pct', 1.5)):.1f}% · "
+            f"가드 점수 {float(params.get('bear_guard_score_floor', -2.0)):.1f}"
         )
     if strategy_name == "flux_trend":
         return (
