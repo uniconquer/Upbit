@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.strategy_engine import build_strategy_frame, compare_strategy_backtests, sweep_strategy_parameters
+from src.strategy_engine import build_strategy_frame, compare_strategy_backtests, strategy_options, sweep_strategy_parameters
 
 
 def _sample_ohlcv() -> pd.DataFrame:
@@ -91,6 +91,16 @@ def test_build_strategy_frame_flux_uses_indicator():
 
     assert {"ltf_basis", "ltf_upper", "htf_upper", "buy_signal", "sell_signal"}.issubset(frame.columns)
     assert frame["buy_signal"].dtype == bool
+
+
+def test_strategy_options_include_rsi_trend_guard():
+    options = strategy_options(flux_available=False, flux_ema_available=False)
+    assert options == [
+        "research_trend",
+        "rsi_bb_double_bottom",
+        "rsi_trend_guard",
+        "relative_strength_rotation",
+    ]
 
 
 def test_build_strategy_frame_relative_strength_rotation_uses_shared_builder():

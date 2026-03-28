@@ -5,6 +5,23 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from backtest_strategy_config import (
+    BACKTEST_DEFAULT_PARAMS as _BACKTEST_DEFAULT_PARAMS,
+    BACKTEST_WIDGET_KEYS as _BACKTEST_WIDGET_KEYS,
+    apply_params_to_widgets as _cfg_apply_params_to_widgets,
+    coerce_param_value as _cfg_coerce_param_value,
+    htf_rule_to_widget as _cfg_htf_rule_to_widget,
+    normalize_htf_rule as _cfg_normalize_htf_rule,
+    params_for_strategy as _cfg_params_for_strategy,
+    strategy_param_summary as _cfg_strategy_param_summary,
+)
+from backtest_strategy_schema import (
+    DOUBLE_BOTTOM_STRATEGIES,
+    STRATEGY_CONTROL_SCHEMAS,
+    STRATEGY_DETAIL_COLUMNS,
+    STRATEGY_SWEEP_RESULT_SCHEMAS,
+    STRATEGY_SWEEP_SCHEMAS,
+)
 from strategy import (
     backtest_signal_frame,
     extract_backtest_trade_events,
@@ -77,131 +94,6 @@ _SERIES_LABELS.update(
     }
 )
 
-_BACKTEST_DEFAULT_PARAMS: dict[str, dict[str, object]] = {
-    "research_trend": {
-        "fast_ema": 21,
-        "slow_ema": 55,
-        "breakout_window": 20,
-        "exit_window": 10,
-        "atr_window": 14,
-        "atr_mult": 2.5,
-        "adx_window": 14,
-        "adx_threshold": 18.0,
-        "momentum_window": 20,
-        "volume_window": 20,
-        "volume_threshold": 0.9,
-    },
-    "rsi_bb_double_bottom": {
-        "rsi_len": 14,
-        "oversold": 30.0,
-        "bb_len": 20,
-        "bb_mult": 2.0,
-        "min_down_bars": 2,
-        "low_tolerance_pct": 1.0,
-        "max_setup_bars": 12,
-        "confirm_bars": 4,
-        "use_macd_filter": True,
-        "macd_lookback": 5,
-        "risk_reward": 2.0,
-        "stop_buffer_ticks": 2,
-    },
-    "relative_strength_rotation": {
-        "rs_short_window": 10,
-        "rs_mid_window": 30,
-        "rs_long_window": 90,
-        "trend_ema_window": 55,
-        "breakout_window": 20,
-        "atr_window": 14,
-        "atr_mult": 2.2,
-        "volume_window": 20,
-        "volume_threshold": 0.9,
-        "entry_score": 8.0,
-        "exit_score": 2.0,
-    },
-    "flux_trend": {
-        "ltf_len": 20,
-        "ltf_mult": 2.0,
-        "htf_len": 20,
-        "htf_mult": 2.25,
-        "htf_rule": "60T",
-    },
-    "flux_ema_filter": {
-        "ltf_len": 20,
-        "ltf_mult": 2.0,
-        "htf_len": 20,
-        "htf_mult": 2.25,
-        "htf_rule": "60T",
-        "sensitivity": 3,
-        "atr_period": 2,
-        "trend_ema_length": 240,
-        "confirm_window": 8,
-        "use_heikin_ashi": False,
-    },
-}
-
-_BACKTEST_WIDGET_KEYS: dict[str, dict[str, str]] = {
-    "research_trend": {
-        "fast_ema": "bt_research_fast_ema",
-        "slow_ema": "bt_research_slow_ema",
-        "breakout_window": "bt_research_breakout_window",
-        "exit_window": "bt_research_exit_window",
-        "atr_window": "bt_research_atr_window",
-        "atr_mult": "bt_research_atr_mult",
-        "adx_window": "bt_research_adx_window",
-        "adx_threshold": "bt_research_adx_threshold",
-        "momentum_window": "bt_research_momentum_window",
-        "volume_window": "bt_research_volume_window",
-        "volume_threshold": "bt_research_volume_threshold",
-    },
-    "rsi_bb_double_bottom": {
-        "rsi_len": "bt_db_rsi_len",
-        "oversold": "bt_db_oversold",
-        "bb_len": "bt_db_bb_len",
-        "bb_mult": "bt_db_bb_mult",
-        "min_down_bars": "bt_db_min_down_bars",
-        "low_tolerance_pct": "bt_db_low_tolerance_pct",
-        "max_setup_bars": "bt_db_max_setup_bars",
-        "confirm_bars": "bt_db_confirm_bars",
-        "use_macd_filter": "bt_db_use_macd_filter",
-        "macd_lookback": "bt_db_macd_lookback",
-        "risk_reward": "bt_db_risk_reward",
-        "stop_buffer_ticks": "bt_db_stop_buffer_ticks",
-    },
-    "relative_strength_rotation": {
-        "rs_short_window": "bt_rs_short_window",
-        "rs_mid_window": "bt_rs_mid_window",
-        "rs_long_window": "bt_rs_long_window",
-        "trend_ema_window": "bt_rs_trend_ema_window",
-        "breakout_window": "bt_rs_breakout_window",
-        "atr_window": "bt_rs_atr_window",
-        "atr_mult": "bt_rs_atr_mult",
-        "volume_window": "bt_rs_volume_window",
-        "volume_threshold": "bt_rs_volume_threshold",
-        "entry_score": "bt_rs_entry_score",
-        "exit_score": "bt_rs_exit_score",
-    },
-    "flux_trend": {
-        "ltf_len": "bt_flux_ltf_len",
-        "ltf_mult": "bt_flux_ltf_mult",
-        "htf_len": "bt_flux_htf_len",
-        "htf_mult": "bt_flux_htf_mult",
-        "htf_rule": "bt_flux_htf_rule",
-    },
-    "flux_ema_filter": {
-        "ltf_len": "bt_flux_ema_ltf_len",
-        "ltf_mult": "bt_flux_ema_ltf_mult",
-        "htf_len": "bt_flux_ema_htf_len",
-        "htf_mult": "bt_flux_ema_htf_mult",
-        "htf_rule": "bt_flux_ema_htf_rule",
-        "sensitivity": "bt_flux_ema_sensitivity",
-        "atr_period": "bt_flux_ema_atr_period",
-        "trend_ema_length": "bt_flux_ema_length",
-        "confirm_window": "bt_flux_ema_confirm_window",
-        "use_heikin_ashi": "bt_flux_ema_heikin_ashi",
-    },
-}
-
-
 def _interval_text(value: str) -> str:
     return _INTERVAL_LABELS.get(value, value)
 
@@ -211,6 +103,10 @@ def init_api(a: UpbitAPI, flux, flux_ext):
     api = a
     flux_indicator = flux
     flux_indicator_with_ema = flux_ext
+
+
+_normalize_htf_rule = _cfg_normalize_htf_rule
+_htf_rule_to_widget = _cfg_htf_rule_to_widget
 
 
 @st.cache_data(ttl=600)
@@ -346,93 +242,7 @@ def _market_panel(frame: pd.DataFrame) -> str | None:
 
 
 def _strategy_controls() -> tuple[str, dict[str, float | int | str]]:
-    options = strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
-    current = st.session_state.get("bt_strategy_name", options[0])
-    index = options.index(current) if current in options else 0
-    strategy_name = st.selectbox(
-        "전략",
-        options,
-        index=index,
-        format_func=strategy_label,
-        key="bt_strategy_name",
-    )
-    st.caption(strategy_description(strategy_name))
-
-    params: dict[str, float | int | str] = {}
-    if strategy_name == "research_trend":
-        with st.expander("연구형 추세 돌파 설정", expanded=False):
-            row1 = st.columns(4)
-            params["fast_ema"] = row1[0].number_input("빠른 EMA", 5, 100, 21, 1, key="bt_research_fast_ema")
-            params["slow_ema"] = row1[1].number_input("느린 EMA", 10, 240, 55, 1, key="bt_research_slow_ema")
-            params["breakout_window"] = row1[2].number_input("돌파 창", 5, 120, 20, 1, key="bt_research_breakout_window")
-            params["exit_window"] = row1[3].number_input("청산 창", 3, 80, 10, 1, key="bt_research_exit_window")
-            row2 = st.columns(4)
-            params["atr_window"] = row2[0].number_input("ATR 창", 5, 50, 14, 1, key="bt_research_atr_window")
-            params["atr_mult"] = row2[1].number_input("ATR 배수", 1.0, 6.0, 2.5, 0.1, key="bt_research_atr_mult")
-            params["adx_window"] = row2[2].number_input("ADX 창", 5, 50, 14, 1, key="bt_research_adx_window")
-            params["adx_threshold"] = row2[3].number_input("ADX 기준", 5.0, 40.0, 18.0, 0.5, key="bt_research_adx_threshold")
-            row3 = st.columns(3)
-            params["momentum_window"] = row3[0].number_input("모멘텀 창", 5, 80, 20, 1, key="bt_research_momentum_window")
-            params["volume_window"] = row3[1].number_input("거래량 창", 5, 80, 20, 1, key="bt_research_volume_window")
-            params["volume_threshold"] = row3[2].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key="bt_research_volume_threshold")
-    elif strategy_name == "rsi_bb_double_bottom":
-        with st.expander("RSI+BB 더블바텀 롱 설정", expanded=False):
-            row1 = st.columns(4)
-            params["rsi_len"] = row1[0].number_input("RSI 길이", 2, 50, 14, 1, key="bt_db_rsi_len")
-            params["oversold"] = row1[1].number_input("과매도 기준", 5.0, 50.0, 30.0, 0.5, key="bt_db_oversold")
-            params["bb_len"] = row1[2].number_input("BB 길이", 5, 80, 20, 1, key="bt_db_bb_len")
-            params["bb_mult"] = row1[3].number_input("BB 배수", 0.5, 5.0, 2.0, 0.1, key="bt_db_bb_mult")
-            row2 = st.columns(4)
-            params["min_down_bars"] = row2[0].number_input("연속 하락봉 수", 1, 10, 2, 1, key="bt_db_min_down_bars")
-            params["low_tolerance_pct"] = row2[1].number_input("두 번째 바닥 허용치 (%)", 0.0, 5.0, 1.0, 0.1, key="bt_db_low_tolerance_pct")
-            params["max_setup_bars"] = row2[2].number_input("셋업 유지 바 수", 3, 40, 12, 1, key="bt_db_max_setup_bars")
-            params["confirm_bars"] = row2[3].number_input("확인 대기 바 수", 1, 20, 4, 1, key="bt_db_confirm_bars")
-            row3 = st.columns(4)
-            params["use_macd_filter"] = row3[0].checkbox("MACD 확인 사용", value=True, key="bt_db_use_macd_filter")
-            params["macd_lookback"] = row3[1].number_input("MACD 최근 교차 바 수", 1, 20, 5, 1, key="bt_db_macd_lookback")
-            params["risk_reward"] = row3[2].number_input("손익비", 0.5, 5.0, 2.0, 0.25, key="bt_db_risk_reward")
-            params["stop_buffer_ticks"] = row3[3].number_input("스탑 버퍼 틱", 0, 20, 2, 1, key="bt_db_stop_buffer_ticks")
-    elif strategy_name == "relative_strength_rotation":
-        with st.expander("상대강도 로테이션 설정", expanded=False):
-            row1 = st.columns(4)
-            params["rs_short_window"] = row1[0].number_input("단기 상대강도 창", 3, 80, 10, 1, key="bt_rs_short_window")
-            params["rs_mid_window"] = row1[1].number_input("중기 상대강도 창", 5, 160, 30, 1, key="bt_rs_mid_window")
-            params["rs_long_window"] = row1[2].number_input("장기 상대강도 창", 10, 320, 90, 1, key="bt_rs_long_window")
-            params["trend_ema_window"] = row1[3].number_input("추세 EMA 길이", 10, 240, 55, 1, key="bt_rs_trend_ema_window")
-            row2 = st.columns(4)
-            params["breakout_window"] = row2[0].number_input("돌파 창", 5, 120, 20, 1, key="bt_rs_breakout_window")
-            params["atr_window"] = row2[1].number_input("ATR 창", 5, 50, 14, 1, key="bt_rs_atr_window")
-            params["atr_mult"] = row2[2].number_input("ATR 배수", 1.0, 6.0, 2.2, 0.1, key="bt_rs_atr_mult")
-            params["volume_window"] = row2[3].number_input("거래량 창", 5, 80, 20, 1, key="bt_rs_volume_window")
-            row3 = st.columns(3)
-            params["volume_threshold"] = row3[0].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key="bt_rs_volume_threshold")
-            params["entry_score"] = row3[1].number_input("진입 점수", -20.0, 40.0, 8.0, 0.5, key="bt_rs_entry_score")
-            params["exit_score"] = row3[2].number_input("청산 점수", -20.0, 40.0, 2.0, 0.5, key="bt_rs_exit_score")
-    elif strategy_name == "flux_trend":
-        with st.expander("플럭스 추세 밴드 설정", expanded=False):
-            row = st.columns(5)
-            params["ltf_len"] = row[0].number_input("단기 기준 길이", 5, 400, 20, 1, key="bt_flux_ltf_len")
-            params["ltf_mult"] = row[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1, key="bt_flux_ltf_mult")
-            params["htf_len"] = row[2].number_input("상위 주기 길이", 5, 400, 20, 1, key="bt_flux_htf_len")
-            params["htf_mult"] = row[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1, key="bt_flux_htf_mult")
-            htf = row[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1, key="bt_flux_htf_rule")
-            params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
-    else:
-        with st.expander("플럭스 + EMA 필터 설정", expanded=False):
-            row1 = st.columns(5)
-            params["ltf_len"] = row1[0].number_input("단기 기준 길이", 5, 400, 20, 1, key="bt_flux_ema_ltf_len")
-            params["ltf_mult"] = row1[1].number_input("단기 밴드 배수", 0.1, 10.0, 2.0, 0.1, key="bt_flux_ema_ltf_mult")
-            params["htf_len"] = row1[2].number_input("상위 주기 길이", 5, 400, 20, 1, key="bt_flux_ema_htf_len")
-            params["htf_mult"] = row1[3].number_input("상위 밴드 배수", 0.1, 10.0, 2.25, 0.1, key="bt_flux_ema_htf_mult")
-            htf = row1[4].selectbox("상위 주기", ["30m", "60m", "120m", "240m", "1D"], index=1, key="bt_flux_ema_htf_rule")
-            params["htf_rule"] = htf.replace("m", "T") if htf.endswith("m") else "1D"
-            row2 = st.columns(4)
-            params["sensitivity"] = row2[0].number_input("민감도", 1, 10, 3, 1, key="bt_flux_ema_sensitivity")
-            params["atr_period"] = row2[1].number_input("ATR 기간", 1, 20, 2, 1, key="bt_flux_ema_atr_period")
-            params["trend_ema_length"] = row2[2].number_input("추세 EMA 길이", 20, 400, 240, 5, key="bt_flux_ema_length")
-            params["confirm_window"] = row2[3].number_input("EMA 확인 창", 0, 48, 8, 1, key="bt_flux_ema_confirm_window")
-            params["use_heikin_ashi"] = st.checkbox("Heikin Ashi 사용", value=False, key="bt_flux_ema_heikin_ashi")
-    return strategy_name, params
+    return _strategy_controls_from_schema()
 
 
 def _parse_sweep_values(raw: str, caster):
@@ -455,21 +265,6 @@ def _parse_sweep_values(raw: str, caster):
     return deduped
 
 
-def _normalize_htf_rule(value: str) -> str:
-    text = str(value or "").strip().upper()
-    if not text:
-        return ""
-    if text.endswith("MIN"):
-        return f"{text[:-3]}T"
-    if text.endswith("M") and text[:-1].isdigit():
-        return f"{text[:-1]}T"
-    if text.endswith("T") and text[:-1].isdigit():
-        return text
-    if text.endswith("D") and text[:-1].isdigit():
-        return text
-    return text
-
-
 def _parse_htf_rule_values(raw: str) -> list[str]:
     values = []
     seen: set[str] = set()
@@ -480,13 +275,6 @@ def _parse_htf_rule_values(raw: str) -> list[str]:
         values.append(normalized)
         seen.add(normalized)
     return values
-
-
-def _htf_rule_to_widget(value: object) -> str:
-    normalized = _normalize_htf_rule(str(value or ""))
-    if normalized.endswith("T") and normalized[:-1].isdigit():
-        return f"{normalized[:-1]}m"
-    return normalized or "60m"
 
 
 def _signal_label(value: object) -> str:
@@ -568,6 +356,12 @@ def _apply_params_to_widgets(strategy_name: str, params: dict[str, object]) -> N
             st.session_state[key] = _htf_rule_to_widget(value)
         else:
             st.session_state[key] = _coerce_param_value(value, default)
+
+
+_strategy_param_summary = _cfg_strategy_param_summary
+_coerce_param_value = _cfg_coerce_param_value
+_params_for_strategy = _cfg_params_for_strategy
+_apply_params_to_widgets = _cfg_apply_params_to_widgets
 
 
 def _present_compare_results(results: pd.DataFrame) -> pd.DataFrame:
@@ -657,170 +451,113 @@ def _research_condition_table(frame: pd.DataFrame, params: dict[str, float | int
 
 
 def _present_sweep_results(results: pd.DataFrame, strategy_name: str) -> pd.DataFrame:
+    return _present_sweep_results_from_schema(results, strategy_name)
+
+
+def _strategy_controls_from_schema() -> tuple[str, dict[str, float | int | str]]:
+    options = strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
+    current = st.session_state.get("bt_strategy_name", options[0])
+    index = options.index(current) if current in options else 0
+    strategy_name = st.selectbox(
+        "전략",
+        options,
+        index=index,
+        format_func=strategy_label,
+        key="bt_strategy_name",
+    )
+    st.caption(strategy_description(strategy_name))
+
+    schema = STRATEGY_CONTROL_SCHEMAS.get(strategy_name, {})
+    defaults = _BACKTEST_DEFAULT_PARAMS.get(strategy_name, {})
+    widgets = _BACKTEST_WIDGET_KEYS.get(strategy_name, {})
+    params: dict[str, float | int | str] = {}
+
+    with st.expander(str(schema.get("title") or "전략 설정"), expanded=False):
+        for row in list(schema.get("rows") or []):
+            fields = list(row)
+            columns = st.columns(len(fields))
+            for column, field in zip(columns, fields, strict=False):
+                name = str(field["name"])
+                kind = str(field["kind"])
+                label = str(field["label"])
+                default = defaults.get(name, field.get("default"))
+                key = widgets.get(name, f"bt_{strategy_name}_{name}")
+                if kind == "bool":
+                    params[name] = bool(column.checkbox(label, value=bool(default), key=key))
+                elif kind == "select":
+                    options = list(field.get("options") or [])
+                    widget_default = _htf_rule_to_widget(default)
+                    selected = column.selectbox(
+                        label,
+                        options,
+                        index=options.index(widget_default) if widget_default in options else 0,
+                        key=key,
+                    )
+                    params[name] = _normalize_htf_rule(selected)
+                elif kind == "float":
+                    params[name] = float(
+                        column.number_input(
+                            label,
+                            float(field["min"]),
+                            float(field["max"]),
+                            float(default),
+                            float(field["step"]),
+                            key=key,
+                        )
+                    )
+                else:
+                    params[name] = int(
+                        column.number_input(
+                            label,
+                            int(field["min"]),
+                            int(field["max"]),
+                            int(default),
+                            int(field["step"]),
+                            key=key,
+                        )
+                    )
+    return strategy_name, params
+
+
+def _build_sweep_grid(strategy_name: str, strategy_params: dict[str, object]) -> dict[str, list[object]]:
+    schema = STRATEGY_SWEEP_SCHEMAS.get(strategy_name, {})
+    grid: dict[str, list[object]] = {}
+    for row in list(schema.get("rows") or []):
+        fields = list(row)
+        columns = st.columns(len(fields))
+        for column, field in zip(columns, fields, strict=False):
+            name = str(field["name"])
+            parser = str(field.get("parser") or "")
+            if parser == "current_bool":
+                grid[name] = [bool(strategy_params.get(name, field.get("default", False)))]
+                continue
+            raw = column.text_input(str(field["label"]), str(field["default"]), key=str(field["key"]))
+            if parser == "int":
+                grid[name] = _parse_sweep_values(raw, int)
+            elif parser == "float":
+                grid[name] = _parse_sweep_values(raw, float)
+            elif parser == "htf_rule":
+                grid[name] = _parse_htf_rule_values(raw)
+            else:
+                grid[name] = []
+    return grid
+
+
+def _present_sweep_results_from_schema(results: pd.DataFrame, strategy_name: str) -> pd.DataFrame:
     visible = results.copy()
     for column in ["total_return_pct", "win_rate_pct", "max_drawdown_pct"]:
         if column in visible.columns:
             visible[column] = visible[column].apply(lambda value: f"{float(value):.2f}%")
-    if strategy_name == "research_trend":
-        ordered = [
-            "fast_ema",
-            "slow_ema",
-            "breakout_window",
-            "atr_mult",
-            "adx_threshold",
-            "trades",
-            "buy_signals",
-            "sell_signals",
-            "total_return_pct",
-            "win_rate_pct",
-            "max_drawdown_pct",
-        ]
-        rename_map = {
-            "fast_ema": "빠른 EMA",
-            "slow_ema": "느린 EMA",
-            "breakout_window": "돌파 창",
-            "atr_mult": "ATR 배수",
-            "adx_threshold": "ADX 기준",
-            "trades": "거래 수",
-            "buy_signals": "매수 신호 수",
-            "sell_signals": "매도 신호 수",
-            "total_return_pct": "수익률",
-            "win_rate_pct": "승률",
-            "max_drawdown_pct": "최대 낙폭",
-        }
-    elif strategy_name == "rsi_bb_double_bottom":
-        ordered = [
-            "rsi_len",
-            "oversold",
-            "bb_len",
-            "bb_mult",
-            "min_down_bars",
-            "low_tolerance_pct",
-            "confirm_bars",
-            "risk_reward",
-            "trades",
-            "buy_signals",
-            "sell_signals",
-            "total_return_pct",
-            "win_rate_pct",
-            "max_drawdown_pct",
-        ]
-        rename_map = {
-            "rsi_len": "RSI 길이",
-            "oversold": "과매도 기준",
-            "bb_len": "BB 길이",
-            "bb_mult": "BB 배수",
-            "min_down_bars": "연속 하락봉 수",
-            "low_tolerance_pct": "바닥 허용치(%)",
-            "confirm_bars": "확인 바 수",
-            "risk_reward": "손익비",
-            "trades": "거래 수",
-            "buy_signals": "매수 신호 수",
-            "sell_signals": "매도 신호 수",
-            "total_return_pct": "수익률",
-            "win_rate_pct": "승률",
-            "max_drawdown_pct": "최대 낙폭",
-        }
-    elif strategy_name == "relative_strength_rotation":
-        ordered = [
-            "rs_short_window",
-            "rs_mid_window",
-            "rs_long_window",
-            "trend_ema_window",
-            "breakout_window",
-            "entry_score",
-            "exit_score",
-            "trades",
-            "buy_signals",
-            "sell_signals",
-            "total_return_pct",
-            "win_rate_pct",
-            "max_drawdown_pct",
-        ]
-        rename_map = {
-            "rs_short_window": "단기 RS 창",
-            "rs_mid_window": "중기 RS 창",
-            "rs_long_window": "장기 RS 창",
-            "trend_ema_window": "추세 EMA",
-            "breakout_window": "돌파 창",
-            "entry_score": "진입 점수",
-            "exit_score": "청산 점수",
-            "trades": "거래 수",
-            "buy_signals": "매수 신호 수",
-            "sell_signals": "매도 신호 수",
-            "total_return_pct": "수익률",
-            "win_rate_pct": "승률",
-            "max_drawdown_pct": "최대 낙폭",
-        }
-    elif strategy_name == "flux_trend":
-        ordered = [
-            "ltf_len",
-            "ltf_mult",
-            "htf_len",
-            "htf_mult",
-            "htf_rule",
-            "trades",
-            "buy_signals",
-            "sell_signals",
-            "total_return_pct",
-            "win_rate_pct",
-            "max_drawdown_pct",
-        ]
-        rename_map = {
-            "ltf_len": "단기 길이",
-            "ltf_mult": "단기 배수",
-            "htf_len": "상위 길이",
-            "htf_mult": "상위 배수",
-            "htf_rule": "상위 주기",
-            "trades": "거래 수",
-            "buy_signals": "매수 신호 수",
-            "sell_signals": "매도 신호 수",
-            "total_return_pct": "수익률",
-            "win_rate_pct": "승률",
-            "max_drawdown_pct": "최대 낙폭",
-        }
-    else:
-        ordered = [
-            "ltf_len",
-            "ltf_mult",
-            "htf_len",
-            "htf_mult",
-            "htf_rule",
-            "sensitivity",
-            "atr_period",
-            "trend_ema_length",
-            "confirm_window",
-            "trades",
-            "buy_signals",
-            "sell_signals",
-            "total_return_pct",
-            "win_rate_pct",
-            "max_drawdown_pct",
-        ]
-        rename_map = {
-            "ltf_len": "단기 길이",
-            "ltf_mult": "단기 배수",
-            "htf_len": "상위 길이",
-            "htf_mult": "상위 배수",
-            "htf_rule": "상위 주기",
-            "sensitivity": "민감도",
-            "atr_period": "ATR 기간",
-            "trend_ema_length": "추세 EMA 길이",
-            "confirm_window": "EMA 확인 창",
-            "trades": "거래 수",
-            "buy_signals": "매수 신호 수",
-            "sell_signals": "매도 신호 수",
-            "total_return_pct": "수익률",
-            "win_rate_pct": "승률",
-            "max_drawdown_pct": "최대 낙폭",
-        }
+    layout = STRATEGY_SWEEP_RESULT_SCHEMAS.get(strategy_name, {})
+    ordered = list(layout.get("ordered") or visible.columns.tolist())
+    rename_map = dict(layout.get("rename") or {})
     columns = [column for column in ordered if column in visible.columns]
     return visible[columns].rename(columns=rename_map)
 
 
 def _render_chart(frame: pd.DataFrame, strategy_name: str, bt_result: dict[str, object]):
     is_research = strategy_name == "research_trend"
-    is_double_bottom = strategy_name == "rsi_bb_double_bottom"
+    is_double_bottom = strategy_name in DOUBLE_BOTTOM_STRATEGIES
     is_rotation = strategy_name == "relative_strength_rotation"
     rows = 4 if (is_research or is_rotation or is_double_bottom) else 3
     row_heights = [0.56, 0.16, 0.14, 0.14] if (is_research or is_rotation or is_double_bottom) else [0.64, 0.18, 0.18]
@@ -1101,7 +838,7 @@ def render_backtest():
         fee = float(control_col3.number_input("수수료", 0.0, 0.01, 0.0005, 0.0001, format="%.4f"))
         slippage_bps = float(control_col4.number_input("슬리피지 (bps)", 0.0, 100.0, 3.0, 0.5))
         auto_run = control_col5.checkbox("자동 갱신", value=True)
-        strategy_name, strategy_params = _strategy_controls()
+        strategy_name, strategy_params = _strategy_controls_from_schema()
         notice = st.session_state.pop("bt_apply_notice", "")
         if notice:
             st.success(str(notice))
@@ -1185,14 +922,7 @@ def render_backtest():
 
         tail = frame.tail(20).copy()
         columns = ["close", "strategy_score", "buy_signal", "sell_signal"]
-        if strategy_name == "research_trend":
-            columns.extend(["ema_fast", "ema_slow", "adx", "atr"])
-        elif strategy_name == "rsi_bb_double_bottom":
-            columns.extend(["rsi", "bb_lower", "bb_upper", "trade_stop", "take_profit", "rebound_marker", "second_bottom_marker"])
-        elif strategy_name == "relative_strength_rotation":
-            columns.extend(["rs_short", "rs_mid", "rs_long", "trend_ema", "volume_ratio", "atr_stop"])
-        elif strategy_name == "flux_ema_filter":
-            columns.extend(["strength", "ema_buy", "ema_sell", "flux_buy_signal", "flux_sell_signal"])
+        columns.extend(STRATEGY_DETAIL_COLUMNS.get(strategy_name, []))
         visible = tail[[column for column in columns if column in tail.columns]].rename(
             columns={
                 "close": "종가",
@@ -1215,6 +945,8 @@ def render_backtest():
                 "ema_slow": "느린 EMA",
                 "adx": "ADX",
                 "atr": "ATR",
+                "bearish_regime": "약세 가드",
+                "trend_filter": "추세 통과",
                 "strength": "필터 강도",
                 "ema_buy": "EMA 매수 확인",
                 "ema_sell": "EMA 매도 확인",
@@ -1276,172 +1008,7 @@ def render_backtest():
 
         with st.expander("파라미터 스윕", expanded=False):
             st.caption("현재 선택한 종목과 주기로 여러 조합을 자동 비교합니다. 기본값은 현재 전략 설정을 기준으로 합니다.")
-            if strategy_name == "research_trend":
-                sweep_cols1 = st.columns(3)
-                sweep_cols2 = st.columns(2)
-                grid = {
-                    "fast_ema": _parse_sweep_values(
-                        sweep_cols1[0].text_input("빠른 EMA 후보", "12, 21, 34", key="bt_sweep_fast_ema"),
-                        int,
-                    ),
-                    "slow_ema": _parse_sweep_values(
-                        sweep_cols1[1].text_input("느린 EMA 후보", "55, 89", key="bt_sweep_slow_ema"),
-                        int,
-                    ),
-                    "breakout_window": _parse_sweep_values(
-                        sweep_cols1[2].text_input("돌파 창 후보", "14, 20, 28", key="bt_sweep_breakout"),
-                        int,
-                    ),
-                    "atr_mult": _parse_sweep_values(
-                        sweep_cols2[0].text_input("ATR 배수 후보", "2.0, 2.5, 3.0", key="bt_sweep_atr_mult"),
-                        float,
-                    ),
-                    "adx_threshold": _parse_sweep_values(
-                        sweep_cols2[1].text_input("ADX 기준 후보", "16, 18, 20", key="bt_sweep_adx_threshold"),
-                        float,
-                    ),
-                }
-            elif strategy_name == "rsi_bb_double_bottom":
-                sweep_cols1 = st.columns(4)
-                sweep_cols2 = st.columns(4)
-                grid = {
-                    "rsi_len": _parse_sweep_values(
-                        sweep_cols1[0].text_input("RSI 길이 후보", "10, 14, 18", key="bt_sweep_db_rsi_len"),
-                        int,
-                    ),
-                    "oversold": _parse_sweep_values(
-                        sweep_cols1[1].text_input("과매도 후보", "25, 30, 35", key="bt_sweep_db_oversold"),
-                        float,
-                    ),
-                    "bb_len": _parse_sweep_values(
-                        sweep_cols1[2].text_input("BB 길이 후보", "18, 20, 24", key="bt_sweep_db_bb_len"),
-                        int,
-                    ),
-                    "bb_mult": _parse_sweep_values(
-                        sweep_cols1[3].text_input("BB 배수 후보", "1.8, 2.0, 2.2", key="bt_sweep_db_bb_mult"),
-                        float,
-                    ),
-                    "min_down_bars": _parse_sweep_values(
-                        sweep_cols2[0].text_input("연속 하락봉 후보", "2, 3", key="bt_sweep_db_min_down_bars"),
-                        int,
-                    ),
-                    "low_tolerance_pct": _parse_sweep_values(
-                        sweep_cols2[1].text_input("바닥 허용치 후보", "0.5, 1.0, 1.5", key="bt_sweep_db_low_tolerance_pct"),
-                        float,
-                    ),
-                    "confirm_bars": _parse_sweep_values(
-                        sweep_cols2[2].text_input("확인 바 후보", "3, 4, 5", key="bt_sweep_db_confirm_bars"),
-                        int,
-                    ),
-                    "risk_reward": _parse_sweep_values(
-                        sweep_cols2[3].text_input("손익비 후보", "1.5, 2.0, 2.5", key="bt_sweep_db_risk_reward"),
-                        float,
-                    ),
-                }
-            elif strategy_name == "relative_strength_rotation":
-                sweep_cols1 = st.columns(3)
-                sweep_cols2 = st.columns(3)
-                sweep_cols3 = st.columns(2)
-                grid = {
-                    "rs_short_window": _parse_sweep_values(
-                        sweep_cols1[0].text_input("단기 RS 후보", "8, 10, 14", key="bt_sweep_rs_short_window"),
-                        int,
-                    ),
-                    "rs_mid_window": _parse_sweep_values(
-                        sweep_cols1[1].text_input("중기 RS 후보", "20, 30, 45", key="bt_sweep_rs_mid_window"),
-                        int,
-                    ),
-                    "rs_long_window": _parse_sweep_values(
-                        sweep_cols1[2].text_input("장기 RS 후보", "60, 90, 120", key="bt_sweep_rs_long_window"),
-                        int,
-                    ),
-                    "trend_ema_window": _parse_sweep_values(
-                        sweep_cols2[0].text_input("추세 EMA 후보", "34, 55, 80", key="bt_sweep_rs_trend_ema_window"),
-                        int,
-                    ),
-                    "breakout_window": _parse_sweep_values(
-                        sweep_cols2[1].text_input("돌파 창 후보", "14, 20, 28", key="bt_sweep_rs_breakout_window"),
-                        int,
-                    ),
-                    "entry_score": _parse_sweep_values(
-                        sweep_cols2[2].text_input("진입 점수 후보", "6, 8, 10", key="bt_sweep_rs_entry_score"),
-                        float,
-                    ),
-                    "exit_score": _parse_sweep_values(
-                        sweep_cols3[0].text_input("청산 점수 후보", "0, 2, 4", key="bt_sweep_rs_exit_score"),
-                        float,
-                    ),
-                    "atr_mult": _parse_sweep_values(
-                        sweep_cols3[1].text_input("ATR 배수 후보", "1.8, 2.2, 2.6", key="bt_sweep_rs_atr_mult"),
-                        float,
-                    ),
-                }
-            elif strategy_name == "flux_trend":
-                sweep_cols1 = st.columns(3)
-                sweep_cols2 = st.columns(2)
-                grid = {
-                    "ltf_len": _parse_sweep_values(
-                        sweep_cols1[0].text_input("단기 길이 후보", "14, 20, 28", key="bt_sweep_ltf_len"),
-                        int,
-                    ),
-                    "ltf_mult": _parse_sweep_values(
-                        sweep_cols1[1].text_input("단기 배수 후보", "1.5, 2.0, 2.5", key="bt_sweep_ltf_mult"),
-                        float,
-                    ),
-                    "htf_len": _parse_sweep_values(
-                        sweep_cols1[2].text_input("상위 길이 후보", "20, 30, 40", key="bt_sweep_htf_len"),
-                        int,
-                    ),
-                    "htf_mult": _parse_sweep_values(
-                        sweep_cols2[0].text_input("상위 배수 후보", "2.0, 2.25, 2.5", key="bt_sweep_htf_mult"),
-                        float,
-                    ),
-                    "htf_rule": _parse_htf_rule_values(
-                        sweep_cols2[1].text_input("상위 주기 후보", "60T, 120T, 240T", key="bt_sweep_htf_rule")
-                    ),
-                }
-            else:
-                sweep_cols1 = st.columns(3)
-                sweep_cols2 = st.columns(3)
-                sweep_cols3 = st.columns(3)
-                grid = {
-                    "ltf_len": _parse_sweep_values(
-                        sweep_cols1[0].text_input("단기 길이 후보", "14, 20", key="bt_sweep_flux_ema_ltf_len"),
-                        int,
-                    ),
-                    "ltf_mult": _parse_sweep_values(
-                        sweep_cols1[1].text_input("단기 배수 후보", "1.5, 2.0", key="bt_sweep_flux_ema_ltf_mult"),
-                        float,
-                    ),
-                    "htf_len": _parse_sweep_values(
-                        sweep_cols1[2].text_input("상위 길이 후보", "20, 30", key="bt_sweep_flux_ema_htf_len"),
-                        int,
-                    ),
-                    "htf_mult": _parse_sweep_values(
-                        sweep_cols2[0].text_input("상위 배수 후보", "2.0, 2.25", key="bt_sweep_flux_ema_htf_mult"),
-                        float,
-                    ),
-                    "htf_rule": _parse_htf_rule_values(
-                        sweep_cols2[1].text_input("상위 주기 후보", "60T, 120T", key="bt_sweep_flux_ema_htf_rule")
-                    ),
-                    "sensitivity": _parse_sweep_values(
-                        sweep_cols2[2].text_input("민감도 후보", "2, 3", key="bt_sweep_flux_ema_sensitivity"),
-                        int,
-                    ),
-                    "atr_period": _parse_sweep_values(
-                        sweep_cols3[0].text_input("ATR 기간 후보", "2, 3", key="bt_sweep_flux_ema_atr_period"),
-                        int,
-                    ),
-                    "trend_ema_length": _parse_sweep_values(
-                        sweep_cols3[1].text_input("추세 EMA 후보", "240", key="bt_sweep_flux_ema_length"),
-                        int,
-                    ),
-                    "confirm_window": _parse_sweep_values(
-                        sweep_cols3[2].text_input("EMA 확인 창 후보", "8", key="bt_sweep_flux_ema_confirm_window"),
-                        int,
-                    ),
-                }
-
+            grid = _build_sweep_grid(strategy_name, strategy_params)
             combo_count = parameter_grid_size(grid)
             st.caption(f"총 조합 수: {combo_count}개")
             run_sweep = st.button("파라미터 스윕 실행", use_container_width=True)
@@ -1501,32 +1068,13 @@ def render_backtest():
                     best_cols[0].metric("1위 수익률", f"{float(best['total_return_pct']):.2f}%")
                     best_cols[1].metric("1위 최대 낙폭", f"{float(best['max_drawdown_pct']):.2f}%")
                     best_cols[2].metric("1위 거래 수", int(best["trades"]))
-                    if strategy_name == "research_trend":
-                        label = f"EMA {int(best['fast_ema'])}/{int(best['slow_ema'])} · 돌파 {int(best['breakout_window'])}"
-                    elif strategy_name == "rsi_bb_double_bottom":
-                        label = (
-                            f"RSI {int(best['rsi_len'])} · 과매도 {float(best['oversold']):.1f} · "
-                            f"BB {int(best['bb_len'])}/{float(best['bb_mult']):.1f} · RR {float(best['risk_reward']):.2f}"
-                        )
-                    elif strategy_name == "relative_strength_rotation":
-                        label = (
-                            f"RS {int(best['rs_short_window'])}/{int(best['rs_mid_window'])}/{int(best['rs_long_window'])} · "
-                            f"EMA {int(best['trend_ema_window'])} · 진입 {float(best['entry_score']):.1f}"
-                        )
-                    elif strategy_name == "flux_trend":
-                        label = f"LTF {int(best['ltf_len'])}/{float(best['ltf_mult']):.2f} · HTF {best['htf_rule']}"
-                    else:
-                        label = (
-                            f"LTF {int(best['ltf_len'])}/{float(best['ltf_mult']):.2f} · "
-                            f"EMA {int(best['trend_ema_length'])} · 민감도 {int(best['sensitivity'])} · "
-                            f"확인창 {int(best.get('confirm_window', 8))}"
-                        )
+                    label = _strategy_param_summary(strategy_name, best.to_dict())
                     best_cols[3].metric("1위 조합", label)
                     if st.button("1위 설정을 현재 전략에 적용", key=f"bt_apply_best_{strategy_name}", use_container_width=True):
                         _apply_params_to_widgets(strategy_name, best.to_dict())
                         st.session_state["bt_apply_notice"] = f"{strategy_label(strategy_name)} 1위 조합을 현재 설정에 반영했습니다."
                         st.session_state["bt_force_run"] = True
                         st.rerun()
-                    st.dataframe(_present_sweep_results(sweep_results.head(20), strategy_name), use_container_width=True, hide_index=True)
+                    st.dataframe(_present_sweep_results_from_schema(sweep_results.head(20), strategy_name), use_container_width=True, hide_index=True)
                 else:
                     st.info("종목, 주기, 또는 전략이 바뀌어서 이전 스윕 결과를 숨겼습니다. 다시 실행해 주세요.")

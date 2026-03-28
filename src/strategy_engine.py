@@ -58,7 +58,7 @@ STRATEGY_DESCRIPTIONS = {
 
 
 def strategy_options(flux_available: bool, flux_ema_available: bool = False) -> list[str]:
-    options = ["research_trend", "rsi_bb_double_bottom", "relative_strength_rotation"]
+    options = ["research_trend", "rsi_bb_double_bottom", "rsi_trend_guard", "relative_strength_rotation"]
     if flux_available:
         options.append("flux_trend")
     if flux_ema_available:
