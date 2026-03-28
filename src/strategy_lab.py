@@ -123,6 +123,47 @@ class RoundSummary:
 
 
 @dataclass(frozen=True)
+class EvaluationWindow:
+    name: str
+    train_start: pd.Timestamp | None
+    train_end: pd.Timestamp
+    validation_end: pd.Timestamp | None
+    holdout_end: pd.Timestamp
+
+
+@dataclass(frozen=True)
+class CampaignCandidateResult:
+    candidate: CandidateSpec
+    window_results: list[CandidateResult]
+    campaign_score: float
+    avg_validation_return_pct: float
+    avg_holdout_return_pct: float
+    min_validation_return_pct: float
+    min_holdout_return_pct: float
+    worst_holdout_drawdown_pct: float
+    rank: int = 0
+
+    def to_row(self) -> dict[str, Any]:
+        return {
+            "rank": self.rank,
+            "candidate_id": self.candidate.candidate_id,
+            "track": self.candidate.track,
+            "kind": self.candidate.kind,
+            "strategy_name": self.candidate.strategy_name,
+            "display_name": self.candidate.display_name,
+            "generation": self.candidate.generation,
+            "parent_id": self.candidate.parent_id,
+            "campaign_score": self.campaign_score,
+            "avg_validation_return_pct": self.avg_validation_return_pct,
+            "avg_holdout_return_pct": self.avg_holdout_return_pct,
+            "min_validation_return_pct": self.min_validation_return_pct,
+            "min_holdout_return_pct": self.min_holdout_return_pct,
+            "worst_holdout_drawdown_pct": self.worst_holdout_drawdown_pct,
+            "windows": len(self.window_results),
+        }
+
+
+@dataclass(frozen=True)
 class LabConfig:
     initial_cash: float = 10_000.0
     max_positions: int | None = 0
@@ -273,12 +314,16 @@ def _bounded_mutation(name: str, value: Any, rng: random.Random) -> Any:
             lower, upper = (-20, 40)
         return _mutate_numeric(value, rng, lower=float(lower), upper=float(upper), integer=True)
     lower, upper = (-20.0, 40.0)
+    if "quantile" in key:
+        lower, upper = (0.05, 0.99)
     if any(token in key for token in ("mult", "threshold", "pct", "buffer", "quantile")):
         lower, upper = (0.0, 5.0)
     if "oversold" in key or "floor" in key:
         lower, upper = (-30.0, 50.0)
     if "adx" in key:
         lower, upper = (1.0, 60.0)
+    if "quantile" in key:
+        lower, upper = (0.05, 0.99)
     return _mutate_numeric(value, rng, lower=lower, upper=upper, integer=False)
 
 
@@ -839,3 +884,67 @@ def best_candidate(history: Sequence[RoundSummary]) -> CandidateResult | None:
         if best is None or top.holdout_weighted_score > best.holdout_weighted_score:
             best = top
     return best
+
+
+def evaluate_candidate_campaign(
+    candidate: CandidateSpec,
+    raw_by_market: Mapping[str, pd.DataFrame],
+    *,
+    windows: Sequence[EvaluationWindow],
+    config: LabConfig | None = None,
+) -> CampaignCandidateResult:
+    config = config or LabConfig()
+    window_results = [
+        evaluate_candidate(
+            candidate,
+            raw_by_market,
+            train_start=window.train_start,
+            train_end=window.train_end,
+            validation_end=window.validation_end,
+            holdout_end=window.holdout_end,
+            config=config,
+        )
+        for window in windows
+    ]
+    scores = [result.holdout_weighted_score for result in window_results]
+    validation_returns = [result.validation.return_pct for result in window_results]
+    holdout_returns = [result.holdout.return_pct for result in window_results]
+    worst_holdout_drawdown = min(result.holdout.max_drawdown_pct for result in window_results)
+    avg_score = float(np.mean(scores)) if scores else float("-inf")
+    min_score = min(scores) if scores else float("-inf")
+    avg_validation_return = float(np.mean(validation_returns)) if validation_returns else 0.0
+    avg_holdout_return = float(np.mean(holdout_returns)) if holdout_returns else 0.0
+    min_validation_return = min(validation_returns) if validation_returns else 0.0
+    min_holdout_return = min(holdout_returns) if holdout_returns else 0.0
+    campaign_score = (
+        (avg_score * 0.55)
+        + (min_score * 0.45)
+        - (max(0.0, -min_validation_return) * 0.25)
+        - (max(0.0, -min_holdout_return) * 0.35)
+        - (max(0.0, abs(worst_holdout_drawdown) - 20.0) * 0.20)
+    )
+    return CampaignCandidateResult(
+        candidate=candidate,
+        window_results=window_results,
+        campaign_score=campaign_score,
+        avg_validation_return_pct=avg_validation_return,
+        avg_holdout_return_pct=avg_holdout_return,
+        min_validation_return_pct=min_validation_return,
+        min_holdout_return_pct=min_holdout_return,
+        worst_holdout_drawdown_pct=worst_holdout_drawdown,
+    )
+
+
+def rank_campaign_candidates(results: Sequence[CampaignCandidateResult]) -> list[CampaignCandidateResult]:
+    ranked = sorted(
+        results,
+        key=lambda item: (
+            item.campaign_score,
+            item.min_holdout_return_pct,
+            item.avg_holdout_return_pct,
+            item.min_validation_return_pct,
+            -abs(item.worst_holdout_drawdown_pct),
+        ),
+        reverse=True,
+    )
+    return [replace(result, rank=index + 1) for index, result in enumerate(ranked)]

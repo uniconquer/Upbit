@@ -6,16 +6,20 @@ import pandas as pd
 
 from src.strategy import VOLATILITY_RESET_BREAKOUT_DEFAULTS
 from src.strategy_lab import (
+    CampaignCandidateResult,
     CandidateResult,
     CandidateSpec,
+    EvaluationWindow,
     LabConfig,
     RoundSummary,
     SplitMetrics,
     best_candidate,
     build_lab_strategy_frame,
+    evaluate_candidate_campaign,
     invent_candidate,
     make_offspring,
     mutate_candidate,
+    rank_campaign_candidates,
     rank_candidates,
     run_evolution,
     seed_candidates,
@@ -60,7 +64,7 @@ def test_mutate_candidate_preserves_family_and_advances_generation():
         track="improve",
         kind="engine",
         strategy_name="relative_strength_guard",
-        params={"guard_fast_ema": 13, "guard_adx_floor": 10.0, "use_macd_filter": True},
+        params={"guard_fast_ema": 13, "guard_adx_floor": 10.0, "use_macd_filter": True, "spike_quantile": 0.8},
         generation=2,
     )
 
@@ -70,6 +74,7 @@ def test_mutate_candidate_preserves_family_and_advances_generation():
     assert child.generation == 3
     assert child.strategy_name == parent.strategy_name
     assert child.params["guard_fast_ema"] != parent.params["guard_fast_ema"] or child.params["guard_adx_floor"] != parent.params["guard_adx_floor"]
+    assert 0.05 <= child.params["spike_quantile"] <= 0.99
 
 
 def test_invent_candidate_creates_lab_template():
@@ -162,6 +167,77 @@ def test_split_market_frames_supports_validation_window():
     assert len(train["KRW-A"]) == 6
     assert len(validation["KRW-A"]) == 5
     assert len(holdout["KRW-A"]) == 5
+
+
+def test_evaluate_candidate_campaign_aggregates_and_ranks_windows(monkeypatch):
+    raw = {"KRW-A": _sample_ohlcv()}
+    windows = [
+        EvaluationWindow(
+            name="w1",
+            train_start=pd.Timestamp("2026-03-01 00:00:00"),
+            train_end=pd.Timestamp("2026-03-01 06:00:00"),
+            validation_end=pd.Timestamp("2026-03-01 10:00:00"),
+            holdout_end=pd.Timestamp("2026-03-01 16:00:00"),
+        ),
+        EvaluationWindow(
+            name="w2",
+            train_start=pd.Timestamp("2026-03-01 00:00:00"),
+            train_end=pd.Timestamp("2026-03-01 08:00:00"),
+            validation_end=pd.Timestamp("2026-03-01 12:00:00"),
+            holdout_end=pd.Timestamp("2026-03-01 16:00:00"),
+        ),
+    ]
+
+    def fake_evaluate(candidate, *_args, train_end, **_kwargs):
+        if candidate.strategy_name == "volatility_reset_breakout":
+            if train_end == pd.Timestamp("2026-03-01 06:00:00"):
+                return CandidateResult(
+                    candidate,
+                    SplitMetrics(10000, 10800, 8.0, -5.0, 50.0, 10, 5, 5, 0),
+                    SplitMetrics(10000, 11200, 12.0, -6.0, 55.0, 9, 5, 4, 0),
+                    SplitMetrics(10000, 11100, 11.0, -4.0, 60.0, 8, 4, 4, 0),
+                    6.0,
+                    0.0,
+                )
+            return CandidateResult(
+                candidate,
+                SplitMetrics(10000, 10600, 6.0, -4.0, 50.0, 10, 5, 5, 0),
+                SplitMetrics(10000, 10900, 9.0, -7.0, 55.0, 9, 5, 4, 0),
+                SplitMetrics(10000, 10700, 7.0, -5.0, 60.0, 8, 4, 4, 0),
+                3.0,
+                0.0,
+            )
+        return CandidateResult(
+            candidate,
+            SplitMetrics(10000, 10200, 2.0, -8.0, 45.0, 10, 5, 5, 0),
+            SplitMetrics(10000, 9900, -1.0, -10.0, 48.0, 9, 5, 4, 0),
+            SplitMetrics(10000, 9800, -2.0, -9.0, 40.0, 8, 4, 4, 0),
+            -4.0,
+            0.0,
+        )
+
+    monkeypatch.setattr("src.strategy_lab.evaluate_candidate", fake_evaluate)
+
+    strong = evaluate_candidate_campaign(
+        CandidateSpec("a", "invent", "engine", "volatility_reset_breakout"),
+        raw,
+        windows=windows,
+        config=LabConfig(),
+    )
+    weak = evaluate_candidate_campaign(
+        CandidateSpec("b", "invent", "lab", "lab_range_rebound_v1"),
+        raw,
+        windows=windows,
+        config=LabConfig(),
+    )
+
+    ranked = rank_campaign_candidates([weak, strong])
+
+    assert round(strong.avg_holdout_return_pct, 2) == 9.0
+    assert strong.min_holdout_return_pct == 7.0
+    assert strong.worst_holdout_drawdown_pct == -5.0
+    assert ranked[0].candidate.strategy_name == "volatility_reset_breakout"
+    assert ranked[0].rank == 1
 
 
 def test_run_evolution_uses_fake_evaluator_and_returns_leaderboards(monkeypatch):
