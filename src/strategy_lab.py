@@ -188,6 +188,9 @@ class LabConfig:
     parents_per_track: int = 2
     offspring_per_parent: int = 4
     inventions_per_round: int = 4
+    max_family_survivors: int = 1
+    max_family_offspring: int = 3
+    seed_replay_count: int = 4
     random_seed: int = 7
 
 
@@ -332,6 +335,34 @@ def _dedupe_candidates(candidates: Sequence[CandidateSpec]) -> list[CandidateSpe
     for candidate in candidates:
         unique[candidate.candidate_id] = candidate
     return list(unique.values())
+
+
+def _candidate_family(candidate: CandidateSpec) -> str:
+    return candidate.strategy_name
+
+
+def _reseed_candidates(existing: Sequence[CandidateSpec], *, limit: int) -> list[CandidateSpec]:
+    if limit <= 0:
+        return []
+    seeds = seed_candidates()
+    existing_families = {_candidate_family(candidate) for candidate in existing}
+    selected: list[CandidateSpec] = []
+    seen_ids: set[str] = set()
+    for seed in seeds:
+        if _candidate_family(seed) in existing_families or seed.candidate_id in seen_ids:
+            continue
+        selected.append(seed)
+        seen_ids.add(seed.candidate_id)
+        if len(selected) >= limit:
+            return selected
+    for seed in seeds:
+        if seed.candidate_id in seen_ids:
+            continue
+        selected.append(seed)
+        seen_ids.add(seed.candidate_id)
+        if len(selected) >= limit:
+            return selected
+    return selected
 
 
 def seed_candidates() -> list[CandidateSpec]:
@@ -755,32 +786,55 @@ def select_survivors(
 
     selected: list[CandidateSpec] = []
     seen: set[str] = set()
+    family_counts: dict[str, int] = {}
+
+    def add_candidate(candidate: CandidateSpec) -> None:
+        selected.append(candidate)
+        seen.add(candidate.candidate_id)
+        family = _candidate_family(candidate)
+        family_counts[family] = family_counts.get(family, 0) + 1
+
+    def family_open(candidate: CandidateSpec) -> bool:
+        family = _candidate_family(candidate)
+        return family_counts.get(family, 0) < max(1, config.max_family_survivors)
+
     for track in ("improve", "invent"):
         track_pool = [result for result in ranked if result.candidate.track == track]
         preferred = [result for result in track_pool if passes_survival_floor(result)]
-        track_results = (preferred or track_pool)[: max(1, config.parents_per_track)]
+        track_results = preferred or track_pool
+        track_selected = 0
         for result in track_results:
-            if result.candidate.candidate_id not in seen:
-                selected.append(result.candidate)
-                seen.add(result.candidate.candidate_id)
+            if track_selected >= max(1, config.parents_per_track):
+                break
+            if result.candidate.candidate_id in seen or not family_open(result.candidate):
+                continue
+            add_candidate(result.candidate)
+            track_selected += 1
+        if track_selected >= max(1, config.parents_per_track):
+            continue
+        for result in track_results:
+            if track_selected >= max(1, config.parents_per_track):
+                break
+            if result.candidate.candidate_id in seen:
+                continue
+            add_candidate(result.candidate)
+            track_selected += 1
     total_target = max(2, config.parents_per_track * 2)
     for result in ranked:
         if len(selected) >= total_target:
             break
         if result.candidate.candidate_id in seen:
             continue
-        if not passes_survival_floor(result):
+        if not passes_survival_floor(result) or not family_open(result.candidate):
             continue
-        selected.append(result.candidate)
-        seen.add(result.candidate.candidate_id)
+        add_candidate(result.candidate)
     if len(selected) < total_target:
         for result in ranked:
             if len(selected) >= total_target:
                 break
             if result.candidate.candidate_id in seen:
                 continue
-            selected.append(result.candidate)
-            seen.add(result.candidate.candidate_id)
+            add_candidate(result.candidate)
     return selected
 
 
@@ -793,9 +847,14 @@ def make_offspring(
     config = config or LabConfig()
     rng = rng or random.Random(config.random_seed)
     offspring: list[CandidateSpec] = []
+    family_counts: dict[str, int] = {}
     for parent in parents:
+        family = _candidate_family(parent)
         for _ in range(max(1, config.offspring_per_parent)):
+            if family_counts.get(family, 0) >= max(1, config.max_family_offspring):
+                break
             offspring.append(mutate_candidate(parent, rng=rng, generation=parent.generation + 1))
+            family_counts[family] = family_counts.get(family, 0) + 1
     inventor_parents = [parent for parent in parents if parent.track == "invent"]
     for _ in range(max(0, config.inventions_per_round)):
         base_parent = rng.choice(inventor_parents) if inventor_parents else None
@@ -867,10 +926,14 @@ def run_evolution(
             rng=rng,
         )
         history.append(replace(round_summary, round_index=round_index))
+        offspring = make_offspring(round_summary.survivors, config=config, rng=rng)
         population = _dedupe_candidates([
             *round_summary.survivors,
-            *make_offspring(round_summary.survivors, config=config, rng=rng),
-            *seed_candidates()[:2],
+            *offspring,
+            *_reseed_candidates(
+                [*round_summary.survivors, *offspring],
+                limit=config.seed_replay_count,
+            ),
         ])
     return history
 

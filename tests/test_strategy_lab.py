@@ -23,6 +23,7 @@ from src.strategy_lab import (
     rank_candidates,
     run_evolution,
     seed_candidates,
+    select_survivors,
     split_market_frames,
     _score,
 )
@@ -75,6 +76,22 @@ def test_mutate_candidate_preserves_family_and_advances_generation():
     assert child.strategy_name == parent.strategy_name
     assert child.params["guard_fast_ema"] != parent.params["guard_fast_ema"] or child.params["guard_adx_floor"] != parent.params["guard_adx_floor"]
     assert 0.05 <= child.params["spike_quantile"] <= 0.99
+
+
+def test_make_offspring_limits_family_spread():
+    parents = [
+        CandidateSpec("p1", "invent", "engine", "volatility_reset_breakout", params={"fast_ema": 12}),
+        CandidateSpec("p2", "invent", "engine", "volatility_reset_breakout", params={"fast_ema": 14}),
+    ]
+
+    offspring = make_offspring(
+        parents,
+        config=LabConfig(offspring_per_parent=3, inventions_per_round=0, max_family_offspring=2, random_seed=5),
+        rng=random.Random(5),
+    )
+
+    assert len(offspring) == 2
+    assert all(child.strategy_name == "volatility_reset_breakout" for child in offspring)
 
 
 def test_invent_candidate_creates_lab_template():
@@ -167,6 +184,53 @@ def test_split_market_frames_supports_validation_window():
     assert len(train["KRW-A"]) == 6
     assert len(validation["KRW-A"]) == 5
     assert len(holdout["KRW-A"]) == 5
+
+
+def test_select_survivors_prefers_family_diversity_when_possible():
+    ranked = [
+        CandidateResult(
+            candidate=CandidateSpec("vol-1", "invent", "engine", "volatility_reset_breakout"),
+            train=SplitMetrics(10000, 11200, 12.0, -6.0, 50.0, 10, 5, 5, 0),
+            validation=SplitMetrics(10000, 11400, 14.0, -5.0, 55.0, 9, 5, 4, 0),
+            holdout=SplitMetrics(10000, 11100, 11.0, -4.0, 60.0, 8, 4, 4, 0),
+            holdout_weighted_score=7.0,
+            overfit_gap_pct=1.0,
+            rank=1,
+        ),
+        CandidateResult(
+            candidate=CandidateSpec("vol-2", "invent", "engine", "volatility_reset_breakout"),
+            train=SplitMetrics(10000, 11000, 10.0, -6.0, 50.0, 10, 5, 5, 0),
+            validation=SplitMetrics(10000, 11100, 11.0, -5.0, 55.0, 9, 5, 4, 0),
+            holdout=SplitMetrics(10000, 10900, 9.0, -4.5, 60.0, 8, 4, 4, 0),
+            holdout_weighted_score=6.0,
+            overfit_gap_pct=1.0,
+            rank=2,
+        ),
+        CandidateResult(
+            candidate=CandidateSpec("sq-1", "improve", "engine", "squeeze_breakout"),
+            train=SplitMetrics(10000, 10800, 8.0, -7.0, 50.0, 10, 5, 5, 0),
+            validation=SplitMetrics(10000, 10900, 9.0, -6.0, 55.0, 9, 5, 4, 0),
+            holdout=SplitMetrics(10000, 10700, 7.0, -5.0, 60.0, 8, 4, 4, 0),
+            holdout_weighted_score=5.0,
+            overfit_gap_pct=1.0,
+            rank=3,
+        ),
+        CandidateResult(
+            candidate=CandidateSpec("range-1", "invent", "lab", "lab_range_rebound_v1"),
+            train=SplitMetrics(10000, 10400, 4.0, -8.0, 45.0, 10, 5, 5, 0),
+            validation=SplitMetrics(10000, 10500, 5.0, -7.0, 48.0, 9, 5, 4, 0),
+            holdout=SplitMetrics(10000, 10300, 3.0, -6.0, 50.0, 8, 4, 4, 0),
+            holdout_weighted_score=4.0,
+            overfit_gap_pct=1.0,
+            rank=4,
+        ),
+    ]
+
+    survivors = select_survivors(ranked, config=LabConfig(parents_per_track=1, max_family_survivors=1))
+    survivor_families = {candidate.strategy_name for candidate in survivors}
+
+    assert "volatility_reset_breakout" in survivor_families
+    assert len(survivor_families) >= 2
 
 
 def test_evaluate_candidate_campaign_aggregates_and_ranks_windows(monkeypatch):
