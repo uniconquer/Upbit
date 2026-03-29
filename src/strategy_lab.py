@@ -37,6 +37,43 @@ except ImportError:
 TrackName = Literal["improve", "invent"]
 CandidateKind = Literal["engine", "lab"]
 
+LAB_CAPITULATION_RECLAIM_DEFAULTS: dict[str, float | int] = {
+    "fast_ema": 8,
+    "slow_ema": 55,
+    "rsi_len": 9,
+    "oversold": 28.0,
+    "bb_len": 20,
+    "bb_mult": 2.2,
+    "atr_window": 14,
+    "atr_mult": 1.8,
+    "volume_window": 20,
+    "volume_spike": 1.6,
+    "wick_ratio": 0.45,
+    "panic_drop_pct": 3.0,
+    "reclaim_bars": 3,
+    "exit_rsi": 60.0,
+}
+
+LAB_GUARDED_DRIFT_DEFAULTS: dict[str, float | int] = {
+    "fast_ema": 21,
+    "slow_ema": 89,
+    "rsi_len": 14,
+    "bb_len": 18,
+    "bb_mult": 1.6,
+    "adx_window": 13,
+    "adx_floor": 12.0,
+    "adx_ceiling": 24.0,
+    "atr_window": 14,
+    "atr_ceiling_pct": 2.51,
+    "stop_atr_mult": 1.52,
+    "volume_window": 20,
+    "volume_threshold": 0.85,
+    "pullback_pct": 0.4,
+    "drift_window": 14,
+    "rsi_ceiling": 58.0,
+    "exit_rsi": 52.0,
+}
+
 
 @dataclass(frozen=True)
 class CandidateSpec:
@@ -138,6 +175,8 @@ class CampaignCandidateResult:
     campaign_score: float
     avg_validation_return_pct: float
     avg_holdout_return_pct: float
+    avg_holdout_trades: float
+    min_holdout_trades: int
     min_validation_return_pct: float
     min_holdout_return_pct: float
     worst_holdout_drawdown_pct: float
@@ -156,6 +195,8 @@ class CampaignCandidateResult:
             "campaign_score": self.campaign_score,
             "avg_validation_return_pct": self.avg_validation_return_pct,
             "avg_holdout_return_pct": self.avg_holdout_return_pct,
+            "avg_holdout_trades": self.avg_holdout_trades,
+            "min_holdout_trades": self.min_holdout_trades,
             "min_validation_return_pct": self.min_validation_return_pct,
             "min_holdout_return_pct": self.min_holdout_return_pct,
             "worst_holdout_drawdown_pct": self.worst_holdout_drawdown_pct,
@@ -191,6 +232,9 @@ class LabConfig:
     max_family_survivors: int = 1
     max_family_offspring: int = 3
     seed_replay_count: int = 4
+    campaign_avg_holdout_trade_floor: float = 1.0
+    campaign_zero_holdout_window_penalty: float = 1.5
+    campaign_trade_penalty_weight: float = 3.0
     random_seed: int = 7
 
 
@@ -319,8 +363,10 @@ def _bounded_mutation(name: str, value: Any, rng: random.Random) -> Any:
     lower, upper = (-20.0, 40.0)
     if "quantile" in key:
         lower, upper = (0.05, 0.99)
-    if any(token in key for token in ("mult", "threshold", "pct", "buffer", "quantile")):
+    if any(token in key for token in ("mult", "threshold", "pct", "buffer", "quantile", "ratio")):
         lower, upper = (0.0, 5.0)
+    if "rsi" in key:
+        lower, upper = (5.0, 95.0)
     if "oversold" in key or "floor" in key:
         lower, upper = (-30.0, 50.0)
     if "adx" in key:
@@ -328,6 +374,68 @@ def _bounded_mutation(name: str, value: Any, rng: random.Random) -> Any:
     if "quantile" in key:
         lower, upper = (0.05, 0.99)
     return _mutate_numeric(value, rng, lower=lower, upper=upper, integer=False)
+
+
+def _clamp_int(value: Any, lower: int, upper: int) -> int:
+    return max(lower, min(upper, int(round(float(value)))))
+
+
+def _clamp_float(value: Any, lower: float, upper: float) -> float:
+    return max(lower, min(upper, float(value)))
+
+
+def _normalize_candidate_params(strategy_name: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(params)
+    if strategy_name == "lab_capitulation_reclaim_v1":
+        fast_ema = _clamp_int(normalized.get("fast_ema", 8), 3, 34)
+        slow_ema = _clamp_int(normalized.get("slow_ema", 55), max(21, fast_ema + 8), 144)
+        oversold = _clamp_float(normalized.get("oversold", 28.0), 18.0, 40.0)
+        normalized.update(
+            {
+                "fast_ema": fast_ema,
+                "slow_ema": slow_ema,
+                "rsi_len": _clamp_int(normalized.get("rsi_len", 9), 4, 21),
+                "oversold": oversold,
+                "bb_len": _clamp_int(normalized.get("bb_len", 20), 10, 40),
+                "bb_mult": _clamp_float(normalized.get("bb_mult", 2.2), 1.2, 3.2),
+                "atr_window": _clamp_int(normalized.get("atr_window", 14), 5, 28),
+                "atr_mult": _clamp_float(normalized.get("atr_mult", 1.8), 0.8, 3.5),
+                "volume_window": _clamp_int(normalized.get("volume_window", 20), 5, 40),
+                "volume_spike": _clamp_float(normalized.get("volume_spike", 1.6), 1.1, 2.2),
+                "wick_ratio": _clamp_float(normalized.get("wick_ratio", 0.45), 0.15, 0.85),
+                "panic_drop_pct": _clamp_float(normalized.get("panic_drop_pct", 3.0), 1.0, 6.0),
+                "reclaim_bars": _clamp_int(normalized.get("reclaim_bars", 3), 2, 5),
+                "exit_rsi": _clamp_float(normalized.get("exit_rsi", 60.0), max(45.0, oversold + 12.0), 85.0),
+            }
+        )
+    elif strategy_name == "lab_guarded_drift_v1":
+        fast_ema = _clamp_int(normalized.get("fast_ema", 21), 5, 34)
+        slow_ema = _clamp_int(normalized.get("slow_ema", 89), max(34, fast_ema + 12), 144)
+        adx_floor = _clamp_float(normalized.get("adx_floor", 12.0), 8.0, 25.0)
+        adx_ceiling = _clamp_float(normalized.get("adx_ceiling", 28.0), max(18.0, adx_floor + 4.0), 45.0)
+        rsi_ceiling = _clamp_float(normalized.get("rsi_ceiling", 68.0), 55.0, 82.0)
+        normalized.update(
+            {
+                "fast_ema": fast_ema,
+                "slow_ema": slow_ema,
+                "rsi_len": _clamp_int(normalized.get("rsi_len", 14), 5, 28),
+                "bb_len": _clamp_int(normalized.get("bb_len", 20), 10, 40),
+                "bb_mult": _clamp_float(normalized.get("bb_mult", 1.6), 1.0, 2.5),
+                "adx_window": _clamp_int(normalized.get("adx_window", 14), 5, 28),
+                "adx_floor": adx_floor,
+                "adx_ceiling": adx_ceiling,
+                "atr_window": _clamp_int(normalized.get("atr_window", 14), 5, 28),
+                "atr_ceiling_pct": _clamp_float(normalized.get("atr_ceiling_pct", 2.2), 0.8, 4.0),
+                "stop_atr_mult": _clamp_float(normalized.get("stop_atr_mult", 1.6), 0.8, 3.0),
+                "volume_window": _clamp_int(normalized.get("volume_window", 20), 5, 40),
+                "volume_threshold": _clamp_float(normalized.get("volume_threshold", 0.85), 0.6, 1.4),
+                "pullback_pct": _clamp_float(normalized.get("pullback_pct", 0.8), 0.2, 2.0),
+                "drift_window": _clamp_int(normalized.get("drift_window", 12), 4, 24),
+                "rsi_ceiling": rsi_ceiling,
+                "exit_rsi": _clamp_float(normalized.get("exit_rsi", 48.0), 35.0, max(40.0, rsi_ceiling - 4.0)),
+            }
+        )
+    return normalized
 
 
 def _dedupe_candidates(candidates: Sequence[CandidateSpec]) -> list[CandidateSpec]:
@@ -418,6 +526,12 @@ def seed_candidates() -> list[CandidateSpec]:
             "volume_window": 20,
             "volume_threshold": 0.9,
         }),
+        ("invent", "lab", "lab_capitulation_reclaim_v1", {
+            **LAB_CAPITULATION_RECLAIM_DEFAULTS,
+        }),
+        ("invent", "lab", "lab_guarded_drift_v1", {
+            **LAB_GUARDED_DRIFT_DEFAULTS,
+        }),
         ("invent", "lab", "lab_regime_switch_v1", {
             "trend_fast_ema": 21,
             "trend_slow_ema": 55,
@@ -450,6 +564,7 @@ def seed_candidates() -> list[CandidateSpec]:
 def mutate_candidate(candidate: CandidateSpec, *, rng: random.Random | None = None, generation: int | None = None) -> CandidateSpec:
     rng = rng or random.Random()
     params = {key: _bounded_mutation(key, value, rng) for key, value in candidate.params.items()}
+    params = _normalize_candidate_params(candidate.strategy_name, params)
     next_generation = candidate.generation + 1 if generation is None else generation
     return CandidateSpec(
         candidate_id=_stable_id(candidate.kind, candidate.track, candidate.strategy_name, params, next_generation),
@@ -470,7 +585,13 @@ def invent_candidate(
     generation: int = 0,
 ) -> CandidateSpec:
     rng = rng or random.Random()
-    template = rng.choice(["lab_breakout_reversion_v1", "lab_range_rebound_v1", "lab_regime_switch_v1"])
+    template = rng.choice([
+        "lab_breakout_reversion_v1",
+        "lab_range_rebound_v1",
+        "lab_capitulation_reclaim_v1",
+        "lab_guarded_drift_v1",
+        "lab_regime_switch_v1",
+    ])
     base = dict(parent.params) if parent is not None else {}
     if template == "lab_breakout_reversion_v1":
         params = {
@@ -498,6 +619,43 @@ def invent_candidate(
             "volume_window": int(base.get("volume_window", 20)),
             "volume_threshold": float(base.get("volume_threshold", 0.9)),
         }
+    elif template == "lab_capitulation_reclaim_v1":
+        params = {
+            "fast_ema": int(base.get("fast_ema", LAB_CAPITULATION_RECLAIM_DEFAULTS["fast_ema"])),
+            "slow_ema": int(base.get("slow_ema", LAB_CAPITULATION_RECLAIM_DEFAULTS["slow_ema"])),
+            "rsi_len": int(base.get("rsi_len", LAB_CAPITULATION_RECLAIM_DEFAULTS["rsi_len"])),
+            "oversold": float(base.get("oversold", LAB_CAPITULATION_RECLAIM_DEFAULTS["oversold"])),
+            "bb_len": int(base.get("bb_len", LAB_CAPITULATION_RECLAIM_DEFAULTS["bb_len"])),
+            "bb_mult": float(base.get("bb_mult", LAB_CAPITULATION_RECLAIM_DEFAULTS["bb_mult"])),
+            "atr_window": int(base.get("atr_window", LAB_CAPITULATION_RECLAIM_DEFAULTS["atr_window"])),
+            "atr_mult": float(base.get("atr_mult", LAB_CAPITULATION_RECLAIM_DEFAULTS["atr_mult"])),
+            "volume_window": int(base.get("volume_window", LAB_CAPITULATION_RECLAIM_DEFAULTS["volume_window"])),
+            "volume_spike": float(base.get("volume_spike", LAB_CAPITULATION_RECLAIM_DEFAULTS["volume_spike"])),
+            "wick_ratio": float(base.get("wick_ratio", LAB_CAPITULATION_RECLAIM_DEFAULTS["wick_ratio"])),
+            "panic_drop_pct": float(base.get("panic_drop_pct", LAB_CAPITULATION_RECLAIM_DEFAULTS["panic_drop_pct"])),
+            "reclaim_bars": int(base.get("reclaim_bars", LAB_CAPITULATION_RECLAIM_DEFAULTS["reclaim_bars"])),
+            "exit_rsi": float(base.get("exit_rsi", LAB_CAPITULATION_RECLAIM_DEFAULTS["exit_rsi"])),
+        }
+    elif template == "lab_guarded_drift_v1":
+        params = {
+            "fast_ema": int(base.get("fast_ema", LAB_GUARDED_DRIFT_DEFAULTS["fast_ema"])),
+            "slow_ema": int(base.get("slow_ema", LAB_GUARDED_DRIFT_DEFAULTS["slow_ema"])),
+            "rsi_len": int(base.get("rsi_len", LAB_GUARDED_DRIFT_DEFAULTS["rsi_len"])),
+            "bb_len": int(base.get("bb_len", LAB_GUARDED_DRIFT_DEFAULTS["bb_len"])),
+            "bb_mult": float(base.get("bb_mult", LAB_GUARDED_DRIFT_DEFAULTS["bb_mult"])),
+            "adx_window": int(base.get("adx_window", LAB_GUARDED_DRIFT_DEFAULTS["adx_window"])),
+            "adx_floor": float(base.get("adx_floor", LAB_GUARDED_DRIFT_DEFAULTS["adx_floor"])),
+            "adx_ceiling": float(base.get("adx_ceiling", LAB_GUARDED_DRIFT_DEFAULTS["adx_ceiling"])),
+            "atr_window": int(base.get("atr_window", LAB_GUARDED_DRIFT_DEFAULTS["atr_window"])),
+            "atr_ceiling_pct": float(base.get("atr_ceiling_pct", LAB_GUARDED_DRIFT_DEFAULTS["atr_ceiling_pct"])),
+            "stop_atr_mult": float(base.get("stop_atr_mult", LAB_GUARDED_DRIFT_DEFAULTS["stop_atr_mult"])),
+            "volume_window": int(base.get("volume_window", LAB_GUARDED_DRIFT_DEFAULTS["volume_window"])),
+            "volume_threshold": float(base.get("volume_threshold", LAB_GUARDED_DRIFT_DEFAULTS["volume_threshold"])),
+            "pullback_pct": float(base.get("pullback_pct", LAB_GUARDED_DRIFT_DEFAULTS["pullback_pct"])),
+            "drift_window": int(base.get("drift_window", LAB_GUARDED_DRIFT_DEFAULTS["drift_window"])),
+            "rsi_ceiling": float(base.get("rsi_ceiling", LAB_GUARDED_DRIFT_DEFAULTS["rsi_ceiling"])),
+            "exit_rsi": float(base.get("exit_rsi", LAB_GUARDED_DRIFT_DEFAULTS["exit_rsi"])),
+        }
     else:
         params = {
             "trend_fast_ema": int(base.get("trend_fast_ema", 21)),
@@ -511,6 +669,7 @@ def invent_candidate(
             "volume_threshold": float(base.get("volume_threshold", 1.0)),
             "regime_threshold": float(base.get("regime_threshold", 0.0)),
         }
+    params = _normalize_candidate_params(template, params)
     return CandidateSpec(
         candidate_id=_stable_id("lab", "invent", template, params, generation),
         track="invent",
@@ -615,6 +774,134 @@ def _build_lab_range_rebound_signals(raw: pd.DataFrame, params: Mapping[str, Any
     return df
 
 
+def _build_lab_capitulation_reclaim_signals(raw: pd.DataFrame, params: Mapping[str, Any]) -> pd.DataFrame:
+    df = raw.copy()
+    open_ = df["open"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    defaults = LAB_CAPITULATION_RECLAIM_DEFAULTS
+    fast_ema = int(params.get("fast_ema", defaults["fast_ema"]))
+    slow_ema = int(params.get("slow_ema", defaults["slow_ema"]))
+    rsi_len = int(params.get("rsi_len", defaults["rsi_len"]))
+    oversold = float(params.get("oversold", defaults["oversold"]))
+    bb_len = int(params.get("bb_len", defaults["bb_len"]))
+    bb_mult = float(params.get("bb_mult", defaults["bb_mult"]))
+    atr_window = int(params.get("atr_window", defaults["atr_window"]))
+    atr_mult = float(params.get("atr_mult", defaults["atr_mult"]))
+    volume_window = int(params.get("volume_window", defaults["volume_window"]))
+    volume_spike = float(params.get("volume_spike", defaults["volume_spike"]))
+    wick_ratio = float(params.get("wick_ratio", defaults["wick_ratio"]))
+    panic_drop_pct = float(params.get("panic_drop_pct", defaults["panic_drop_pct"]))
+    reclaim_bars = int(params.get("reclaim_bars", defaults["reclaim_bars"]))
+    exit_rsi = float(params.get("exit_rsi", defaults["exit_rsi"]))
+
+    df["ema_fast"] = ema(close, fast_ema)
+    df["ema_slow"] = ema(close, slow_ema)
+    df["rsi"] = relative_strength_index(close, rsi_len)
+    bb_basis, bb_upper, bb_lower = bollinger_bands(close, bb_len, bb_mult)
+    df["bb_basis"] = bb_basis
+    df["bb_upper"] = bb_upper
+    df["bb_lower"] = bb_lower
+    df["atr"] = average_true_range(df, atr_window)
+    df["volume_ratio"] = df["volume"] / df["volume"].rolling(volume_window).mean().replace(0.0, np.nan)
+    candle_range = (high - low).replace(0.0, np.nan)
+    lower_body = pd.concat([open_, close], axis=1).min(axis=1)
+    df["lower_wick_ratio"] = ((lower_body - low).clip(lower=0.0) / candle_range).fillna(0.0)
+    df["panic_drop_pct"] = ((open_ - close) / open_.replace(0.0, np.nan) * 100.0).fillna(0.0)
+    df["atr_stop"] = close - (atr_mult * df["atr"])
+
+    panic = (
+        (low < df["bb_lower"])
+        & (df["rsi"] <= oversold)
+        & (df["lower_wick_ratio"] >= wick_ratio)
+        & (df["panic_drop_pct"] >= panic_drop_pct)
+        & (df["volume_ratio"].fillna(1.0) >= volume_spike)
+    )
+    panic_recent = panic.rolling(reclaim_bars, min_periods=1).max().astype(bool)
+    reclaim = (close > open_) & (close > close.shift(1)) & (close > df["ema_fast"]) & (close > df["bb_lower"])
+    trend_guard = df["ema_slow"] >= (df["ema_slow"].shift(max(2, slow_ema // 8)) * 0.998)
+    volume_ok = df["volume_ratio"].fillna(1.0) >= max(0.85, volume_spike * 0.55)
+    distance_below_band = (((df["bb_lower"] - close) / close.replace(0.0, np.nan)) * 100.0).clip(lower=0.0).fillna(0.0)
+    df["strategy_score"] = (
+        (oversold - df["rsi"]).clip(lower=0.0).fillna(0.0)
+        + df["lower_wick_ratio"] * 25.0
+        + df["panic_drop_pct"].fillna(0.0) * 1.3
+        + (df["volume_ratio"].fillna(1.0) - 1.0) * 8.0
+        + distance_below_band * 1.6
+    )
+    raw_buy = panic_recent & reclaim & trend_guard & volume_ok
+    raw_sell = (df["rsi"] >= exit_rsi) | (close >= df["bb_basis"]) | (close < df["atr_stop"]) | (close < df["ema_fast"])
+    df["panic_event"] = panic.astype(bool)
+    df["panic_recent"] = panic_recent
+    df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
+    df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
+def _build_lab_guarded_drift_signals(raw: pd.DataFrame, params: Mapping[str, Any]) -> pd.DataFrame:
+    df = raw.copy()
+    open_ = df["open"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    defaults = LAB_GUARDED_DRIFT_DEFAULTS
+    fast_ema = int(params.get("fast_ema", defaults["fast_ema"]))
+    slow_ema = int(params.get("slow_ema", defaults["slow_ema"]))
+    rsi_len = int(params.get("rsi_len", defaults["rsi_len"]))
+    bb_len = int(params.get("bb_len", defaults["bb_len"]))
+    bb_mult = float(params.get("bb_mult", defaults["bb_mult"]))
+    adx_window = int(params.get("adx_window", defaults["adx_window"]))
+    adx_floor = float(params.get("adx_floor", defaults["adx_floor"]))
+    adx_ceiling = float(params.get("adx_ceiling", defaults["adx_ceiling"]))
+    atr_window = int(params.get("atr_window", defaults["atr_window"]))
+    atr_ceiling_pct = float(params.get("atr_ceiling_pct", defaults["atr_ceiling_pct"]))
+    stop_atr_mult = float(params.get("stop_atr_mult", defaults["stop_atr_mult"]))
+    volume_window = int(params.get("volume_window", defaults["volume_window"]))
+    volume_threshold = float(params.get("volume_threshold", defaults["volume_threshold"]))
+    pullback_pct = float(params.get("pullback_pct", defaults["pullback_pct"]))
+    drift_window = int(params.get("drift_window", defaults["drift_window"]))
+    rsi_ceiling = float(params.get("rsi_ceiling", defaults["rsi_ceiling"]))
+    exit_rsi = float(params.get("exit_rsi", defaults["exit_rsi"]))
+
+    df["ema_fast"] = ema(close, fast_ema)
+    df["ema_slow"] = ema(close, slow_ema)
+    df["rsi"] = relative_strength_index(close, rsi_len)
+    df["adx"] = average_directional_index(df, adx_window)
+    df["atr"] = average_true_range(df, atr_window)
+    bb_basis, bb_upper, bb_lower = bollinger_bands(close, bb_len, bb_mult)
+    df["bb_basis"] = bb_basis
+    df["bb_upper"] = bb_upper
+    df["bb_lower"] = bb_lower
+    df["volume_ratio"] = df["volume"] / df["volume"].rolling(volume_window).mean().replace(0.0, np.nan)
+    df["atr_pct"] = (df["atr"] / close.replace(0.0, np.nan) * 100.0).fillna(0.0)
+    df["drift_return_pct"] = (close.pct_change(drift_window) * 100.0).fillna(0.0)
+    df["trend_gap"] = ((close / df["ema_slow"].replace(0.0, np.nan)) - 1.0) * 100.0
+    df["atr_stop"] = df["ema_slow"] - (stop_atr_mult * df["atr"])
+
+    slope_window = max(2, slow_ema // 8)
+    trend_ok = (close > df["ema_slow"]) & (df["ema_fast"] > df["ema_slow"]) & (df["ema_slow"] > df["ema_slow"].shift(slope_window))
+    adx_ok = df["adx"].between(adx_floor, adx_ceiling, inclusive="both")
+    volatility_ok = df["atr_pct"] <= atr_ceiling_pct
+    pullback_upper = df["ema_fast"] * (1.0 + (pullback_pct / 100.0))
+    pullback_lower = df["ema_fast"] * (1.0 - (pullback_pct / 100.0))
+    pullback = (low <= pullback_upper) & (close >= pullback_lower)
+    rebound = (close > open_) & (close > close.shift(1)) & (close >= df["bb_basis"])
+    rsi_ok = df["rsi"].between(50.0, rsi_ceiling, inclusive="both")
+    volume_ok = df["volume_ratio"].fillna(1.0) >= volume_threshold
+    df["strategy_score"] = (
+        df["drift_return_pct"].fillna(0.0) * 1.1
+        + df["trend_gap"].fillna(0.0) * 1.5
+        + (df["volume_ratio"].fillna(1.0) - 1.0) * 4.0
+        - df["atr_pct"].fillna(0.0) * 2.0
+        - (df["rsi"].sub(58.0).abs().fillna(58.0) * 0.18)
+    )
+    raw_buy = trend_ok & adx_ok & volatility_ok & pullback & rebound & rsi_ok & volume_ok
+    raw_sell = (close < df["ema_slow"]) | (close < df["atr_stop"]) | ((df["rsi"] <= exit_rsi) & (close < close.shift(1)))
+    df["buy_signal"] = raw_buy & (~raw_buy.shift(1, fill_value=False))
+    df["sell_signal"] = raw_sell & (~raw_sell.shift(1, fill_value=False))
+    return df
+
+
 def _build_lab_regime_switch_signals(raw: pd.DataFrame, params: Mapping[str, Any]) -> pd.DataFrame:
     trend = _build_lab_breakout_reversion_signals(raw, params)
     range_ = _build_lab_range_rebound_signals(raw, params)
@@ -674,6 +961,8 @@ def _build_lab_regime_switch_signals(raw: pd.DataFrame, params: Mapping[str, Any
 LAB_BUILDERS: dict[str, Callable[[pd.DataFrame, Mapping[str, Any]], pd.DataFrame]] = {
     "lab_breakout_reversion_v1": _build_lab_breakout_reversion_signals,
     "lab_range_rebound_v1": _build_lab_range_rebound_signals,
+    "lab_capitulation_reclaim_v1": _build_lab_capitulation_reclaim_signals,
+    "lab_guarded_drift_v1": _build_lab_guarded_drift_signals,
     "lab_regime_switch_v1": _build_lab_regime_switch_signals,
 }
 
@@ -972,19 +1261,25 @@ def evaluate_candidate_campaign(
     scores = [result.holdout_weighted_score for result in window_results]
     validation_returns = [result.validation.return_pct for result in window_results]
     holdout_returns = [result.holdout.return_pct for result in window_results]
+    holdout_trades = [result.holdout.trades for result in window_results]
     worst_holdout_drawdown = min(result.holdout.max_drawdown_pct for result in window_results)
     avg_score = float(np.mean(scores)) if scores else float("-inf")
     min_score = min(scores) if scores else float("-inf")
     avg_validation_return = float(np.mean(validation_returns)) if validation_returns else 0.0
     avg_holdout_return = float(np.mean(holdout_returns)) if holdout_returns else 0.0
+    avg_holdout_trades = float(np.mean(holdout_trades)) if holdout_trades else 0.0
+    min_holdout_trades = min(holdout_trades) if holdout_trades else 0
     min_validation_return = min(validation_returns) if validation_returns else 0.0
     min_holdout_return = min(holdout_returns) if holdout_returns else 0.0
+    inactive_windows = sum(1 for trades in holdout_trades if trades <= 0)
     campaign_score = (
         (avg_score * 0.55)
         + (min_score * 0.45)
         - (max(0.0, -min_validation_return) * 0.25)
         - (max(0.0, -min_holdout_return) * 0.35)
         - (max(0.0, abs(worst_holdout_drawdown) - 20.0) * 0.20)
+        - (max(0.0, config.campaign_avg_holdout_trade_floor - avg_holdout_trades) * config.campaign_trade_penalty_weight)
+        - (inactive_windows * config.campaign_zero_holdout_window_penalty)
     )
     return CampaignCandidateResult(
         candidate=candidate,
@@ -992,6 +1287,8 @@ def evaluate_candidate_campaign(
         campaign_score=campaign_score,
         avg_validation_return_pct=avg_validation_return,
         avg_holdout_return_pct=avg_holdout_return,
+        avg_holdout_trades=avg_holdout_trades,
+        min_holdout_trades=min_holdout_trades,
         min_validation_return_pct=min_validation_return,
         min_holdout_return_pct=min_holdout_return,
         worst_holdout_drawdown_pct=worst_holdout_drawdown,
@@ -1005,6 +1302,7 @@ def rank_campaign_candidates(results: Sequence[CampaignCandidateResult]) -> list
             item.campaign_score,
             item.min_holdout_return_pct,
             item.avg_holdout_return_pct,
+            item.avg_holdout_trades,
             item.min_validation_return_pct,
             -abs(item.worst_holdout_drawdown_pct),
         ),

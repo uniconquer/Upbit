@@ -10,6 +10,8 @@ from src.strategy_lab import (
     CandidateResult,
     CandidateSpec,
     EvaluationWindow,
+    LAB_CAPITULATION_RECLAIM_DEFAULTS,
+    LAB_GUARDED_DRIFT_DEFAULTS,
     LabConfig,
     RoundSummary,
     SplitMetrics,
@@ -53,10 +55,16 @@ def test_seed_candidates_contains_improve_and_invent_tracks():
         "relative_strength_guard",
         "lab_breakout_reversion_v1",
         "lab_range_rebound_v1",
+        "lab_capitulation_reclaim_v1",
+        "lab_guarded_drift_v1",
         "lab_regime_switch_v1",
     }
     volatility_seed = next(candidate for candidate in seeds if candidate.strategy_name == "volatility_reset_breakout")
     assert volatility_seed.params == VOLATILITY_RESET_BREAKOUT_DEFAULTS
+    capitulation_seed = next(candidate for candidate in seeds if candidate.strategy_name == "lab_capitulation_reclaim_v1")
+    guarded_seed = next(candidate for candidate in seeds if candidate.strategy_name == "lab_guarded_drift_v1")
+    assert capitulation_seed.params == dict(LAB_CAPITULATION_RECLAIM_DEFAULTS)
+    assert guarded_seed.params == dict(LAB_GUARDED_DRIFT_DEFAULTS)
 
 
 def test_mutate_candidate_preserves_family_and_advances_generation():
@@ -99,8 +107,84 @@ def test_invent_candidate_creates_lab_template():
 
     assert candidate.kind == "lab"
     assert candidate.track == "invent"
-    assert candidate.strategy_name in {"lab_breakout_reversion_v1", "lab_range_rebound_v1", "lab_regime_switch_v1"}
+    assert candidate.strategy_name in {
+        "lab_breakout_reversion_v1",
+        "lab_range_rebound_v1",
+        "lab_capitulation_reclaim_v1",
+        "lab_guarded_drift_v1",
+        "lab_regime_switch_v1",
+    }
     assert candidate.generation == 1
+
+
+def test_mutate_candidate_normalizes_new_family_ranges():
+    capitulation = mutate_candidate(
+        CandidateSpec(
+            "cap",
+            "invent",
+            "lab",
+            "lab_capitulation_reclaim_v1",
+            params={
+                "fast_ema": 80,
+                "slow_ema": 12,
+                "rsi_len": 2,
+                "oversold": -10.0,
+                "bb_len": 4,
+                "bb_mult": 9.0,
+                "atr_window": 2,
+                "atr_mult": 8.0,
+                "volume_window": 2,
+                "volume_spike": 0.2,
+                "wick_ratio": 4.0,
+                "panic_drop_pct": 0.1,
+                "reclaim_bars": 1,
+                "exit_rsi": 10.0,
+            },
+        ),
+        rng=random.Random(11),
+        generation=1,
+    )
+    guarded = mutate_candidate(
+        CandidateSpec(
+            "drift",
+            "invent",
+            "lab",
+            "lab_guarded_drift_v1",
+            params={
+                "fast_ema": 70,
+                "slow_ema": 18,
+                "rsi_len": 2,
+                "bb_len": 4,
+                "bb_mult": 8.0,
+                "adx_window": 2,
+                "adx_floor": 35.0,
+                "adx_ceiling": 12.0,
+                "atr_window": 2,
+                "atr_ceiling_pct": 0.1,
+                "stop_atr_mult": 7.0,
+                "volume_window": 2,
+                "volume_threshold": 0.1,
+                "pullback_pct": 5.0,
+                "drift_window": 2,
+                "rsi_ceiling": 40.0,
+                "exit_rsi": 80.0,
+            },
+        ),
+        rng=random.Random(13),
+        generation=1,
+    )
+
+    assert 18.0 <= capitulation.params["oversold"] <= 40.0
+    assert 0.15 <= capitulation.params["wick_ratio"] <= 0.85
+    assert capitulation.params["reclaim_bars"] >= 2
+    assert capitulation.params["fast_ema"] < capitulation.params["slow_ema"]
+    assert 45.0 <= capitulation.params["exit_rsi"] <= 85.0
+
+    assert guarded.params["fast_ema"] < guarded.params["slow_ema"]
+    assert 8.0 <= guarded.params["adx_floor"] <= 25.0
+    assert guarded.params["adx_ceiling"] >= guarded.params["adx_floor"] + 4.0
+    assert 0.2 <= guarded.params["pullback_pct"] <= 2.0
+    assert guarded.params["exit_rsi"] <= guarded.params["rsi_ceiling"] - 4.0
 
 
 def test_build_lab_strategy_frame_returns_signals():
@@ -125,6 +209,59 @@ def test_build_lab_strategy_frame_returns_signals():
     assert {"ema_fast", "ema_slow", "bb_lower", "buy_signal", "sell_signal", "strategy_score"}.issubset(result.columns)
     assert result["buy_signal"].dtype == bool
     assert result["sell_signal"].dtype == bool
+
+
+def test_build_lab_strategy_frame_supports_new_invent_families():
+    frame = _sample_ohlcv()
+
+    capitulation = build_lab_strategy_frame(
+        frame,
+        strategy_name="lab_capitulation_reclaim_v1",
+        params={
+            "fast_ema": 3,
+            "slow_ema": 6,
+            "rsi_len": 4,
+            "oversold": 35.0,
+            "bb_len": 4,
+            "bb_mult": 1.6,
+            "atr_window": 3,
+            "atr_mult": 1.5,
+            "volume_window": 3,
+            "volume_spike": 1.2,
+            "wick_ratio": 0.2,
+            "panic_drop_pct": 1.0,
+            "reclaim_bars": 2,
+            "exit_rsi": 55.0,
+        },
+    )
+    guarded = build_lab_strategy_frame(
+        frame,
+        strategy_name="lab_guarded_drift_v1",
+        params={
+            "fast_ema": 3,
+            "slow_ema": 6,
+            "rsi_len": 4,
+            "bb_len": 4,
+            "bb_mult": 1.2,
+            "adx_window": 3,
+            "adx_floor": 5.0,
+            "adx_ceiling": 40.0,
+            "atr_window": 3,
+            "atr_ceiling_pct": 5.0,
+            "stop_atr_mult": 1.5,
+            "volume_window": 3,
+            "volume_threshold": 0.7,
+            "pullback_pct": 1.5,
+            "drift_window": 3,
+            "rsi_ceiling": 80.0,
+            "exit_rsi": 45.0,
+        },
+    )
+
+    assert {"panic_event", "panic_recent", "strategy_score", "buy_signal", "sell_signal"}.issubset(capitulation.columns)
+    assert {"drift_return_pct", "trend_gap", "atr_pct", "strategy_score", "buy_signal", "sell_signal"}.issubset(guarded.columns)
+    assert capitulation["buy_signal"].dtype == bool
+    assert guarded["sell_signal"].dtype == bool
 
 
 def test_rank_candidates_orders_by_holdout_weighted_score():
@@ -302,6 +439,60 @@ def test_evaluate_candidate_campaign_aggregates_and_ranks_windows(monkeypatch):
     assert strong.worst_holdout_drawdown_pct == -5.0
     assert ranked[0].candidate.strategy_name == "volatility_reset_breakout"
     assert ranked[0].rank == 1
+
+
+def test_evaluate_candidate_campaign_penalizes_inactive_holdout_windows(monkeypatch):
+    raw = {"KRW-A": _sample_ohlcv()}
+    windows = [
+        EvaluationWindow(
+            name="w1",
+            train_start=pd.Timestamp("2026-03-01 00:00:00"),
+            train_end=pd.Timestamp("2026-03-01 06:00:00"),
+            validation_end=pd.Timestamp("2026-03-01 10:00:00"),
+            holdout_end=pd.Timestamp("2026-03-01 16:00:00"),
+        ),
+        EvaluationWindow(
+            name="w2",
+            train_start=pd.Timestamp("2026-03-01 00:00:00"),
+            train_end=pd.Timestamp("2026-03-01 08:00:00"),
+            validation_end=pd.Timestamp("2026-03-01 12:00:00"),
+            holdout_end=pd.Timestamp("2026-03-01 16:00:00"),
+        ),
+    ]
+
+    def fake_evaluate(candidate, *_args, **_kwargs):
+        holdout_trades = 0 if candidate.strategy_name == "inactive_family" else 3
+        return CandidateResult(
+            candidate,
+            SplitMetrics(10000, 10200, 2.0, -2.0, 50.0, 4, 2, 2, 0),
+            SplitMetrics(10000, 10300, 3.0, -2.5, 55.0, 4, 2, 2, 0),
+            SplitMetrics(10000, 10100, 1.0, -1.0, 60.0, holdout_trades, holdout_trades // 2, holdout_trades // 2, 0),
+            1.5,
+            0.0,
+        )
+
+    monkeypatch.setattr("src.strategy_lab.evaluate_candidate", fake_evaluate)
+
+    inactive = evaluate_candidate_campaign(
+        CandidateSpec("inactive", "invent", "lab", "inactive_family"),
+        raw,
+        windows=windows,
+        config=LabConfig(),
+    )
+    active = evaluate_candidate_campaign(
+        CandidateSpec("active", "invent", "lab", "active_family"),
+        raw,
+        windows=windows,
+        config=LabConfig(),
+    )
+
+    ranked = rank_campaign_candidates([inactive, active])
+
+    assert inactive.avg_holdout_trades == 0.0
+    assert inactive.min_holdout_trades == 0
+    assert active.avg_holdout_trades == 3.0
+    assert active.campaign_score > inactive.campaign_score
+    assert ranked[0].candidate.strategy_name == "active_family"
 
 
 def test_run_evolution_uses_fake_evaluator_and_returns_leaderboards(monkeypatch):
