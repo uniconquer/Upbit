@@ -825,6 +825,33 @@ class MRMonitor:
             return max(float(loop_seconds) * 2.0, 60.0)
         return max(float(loop_seconds), min(max(candle_seconds / 10.0, 60.0), 300.0))
 
+    def _next_candle_boundary_at(self, now: float) -> float | None:
+        raw = str(self.interval or "").strip().lower()
+        current = datetime.fromtimestamp(now, tz=timezone.utc).astimezone(KST)
+        if raw == "day":
+            boundary = current.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            return boundary.astimezone(timezone.utc).timestamp()
+        if raw.startswith("minute"):
+            try:
+                step_minutes = max(int(raw.removeprefix("minute")), 1)
+            except Exception:
+                return None
+            day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+            minutes_since_midnight = (current.hour * 60) + current.minute
+            next_block = ((minutes_since_midnight // step_minutes) + 1) * step_minutes
+            boundary = day_start + timedelta(minutes=next_block)
+            return boundary.astimezone(timezone.utc).timestamp()
+        return None
+
+    def _schedule_next_analysis_at(self, now: float, *, loop_seconds: int) -> float:
+        effective_interval = self._effective_analysis_interval_seconds(loop_seconds=loop_seconds)
+        candle_seconds = _interval_seconds(self.interval)
+        if candle_seconds > 0 and effective_interval >= candle_seconds:
+            boundary = self._next_candle_boundary_at(now)
+            if boundary is not None and boundary > now:
+                return boundary
+        return now + effective_interval
+
     def _analysis_due(self, now: float, markets: list[str], loop_seconds: int) -> bool:
         if not markets:
             return False
@@ -1069,7 +1096,7 @@ class MRMonitor:
                 if self.per_request_sleep > 0:
                     time.sleep(self.per_request_sleep)
             self._last_analysis_at = now
-            self._next_analysis_at = now + effective_analysis_interval
+            self._next_analysis_at = self._schedule_next_analysis_at(now, loop_seconds=effective_loop_seconds)
         else:
             rows = self._refresh_cached_rows(markets)
         self.metrics["unrealized_pnl"] = total_unrealized_pnl(

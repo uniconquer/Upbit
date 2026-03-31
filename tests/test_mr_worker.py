@@ -634,6 +634,45 @@ def test_run_cycle_skips_analysis_until_next_interval():
     assert calls == ["KRW-BTC"]
 
 
+def test_run_cycle_aligns_hourly_analysis_to_next_candle_boundary(monkeypatch):
+    api = FakeAPI()
+    monitor = MRMonitor(
+        api,
+        strategy_name="research_trend",
+        risk_limits={"max_trade_krw": 10000},
+        max_open=2,
+        min_fetch_seconds=0,
+        per_request_sleep=0,
+        interval="minute60",
+        analysis_interval_seconds=3600,
+    )
+
+    calls: list[str] = []
+    current_ts = {"value": pd.Timestamp("2026-04-01 00:27:05", tz="Asia/Seoul").timestamp()}
+
+    def fake_build_frame(self, market):
+        calls.append(market)
+        return _signal_frame(close=100.0)
+
+    monitor._build_frame = MethodType(fake_build_frame, monitor)
+    monkeypatch.setattr("src.mr_worker.time.time", lambda: current_ts["value"])
+
+    first = monitor.run_cycle(["KRW-BTC"], loop_seconds=60)
+    expected_boundary = pd.Timestamp("2026-04-01 01:00:00", tz="Asia/Seoul").timestamp()
+
+    assert first["analysis_due"] is True
+    assert monitor._next_analysis_at == expected_boundary
+
+    current_ts["value"] = pd.Timestamp("2026-04-01 00:59:30", tz="Asia/Seoul").timestamp()
+    second = monitor.run_cycle(["KRW-BTC"], loop_seconds=60)
+    assert second["analysis_due"] is False
+
+    current_ts["value"] = expected_boundary
+    third = monitor.run_cycle(["KRW-BTC"], loop_seconds=60)
+    assert third["analysis_due"] is True
+    assert calls == ["KRW-BTC", "KRW-BTC"]
+
+
 def test_kill_switch_blocks_new_entry_but_allows_exit(tmp_path, monkeypatch):
     monkeypatch.setenv("UPBIT_RUNTIME_DIR", str(tmp_path))
     save_kill_switch("trade-kill-switch", enabled=True, reason="테스트")
