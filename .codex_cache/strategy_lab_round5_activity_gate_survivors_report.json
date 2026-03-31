@@ -1,0 +1,218 @@
+{
+  "latest_window_rounds": [
+    {
+      "round": 0,
+      "top_strategy": "volatility_reset_breakout",
+      "top_score": 10.9108,
+      "top_holdout_return_pct": 13.8246,
+      "top_holdout_drawdown_pct": -6.6749,
+      "survivor_families": [
+        "relative_strength_guard",
+        "squeeze_breakout",
+        "volatility_reset_breakout",
+        "lab_capitulation_reclaim_v1"
+      ]
+    },
+    {
+      "round": 1,
+      "top_strategy": "volatility_reset_breakout",
+      "top_score": 10.9108,
+      "top_holdout_return_pct": 13.8246,
+      "top_holdout_drawdown_pct": -6.6749,
+      "survivor_families": [
+        "squeeze_breakout",
+        "relative_strength_guard",
+        "volatility_reset_breakout",
+        "lab_capitulation_reclaim_v1"
+      ]
+    },
+    {
+      "round": 2,
+      "top_strategy": "volatility_reset_breakout",
+      "top_score": 10.9108,
+      "top_holdout_return_pct": 13.8246,
+      "top_holdout_drawdown_pct": -6.6749,
+      "survivor_families": [
+        "squeeze_breakout",
+        "relative_strength_guard",
+        "volatility_reset_breakout",
+        "lab_capitulation_reclaim_v1"
+      ]
+    },
+    {
+      "round": 3,
+      "top_strategy": "volatility_reset_breakout",
+      "top_score": 10.9108,
+      "top_holdout_return_pct": 13.8246,
+      "top_holdout_drawdown_pct": -6.6749,
+      "survivor_families": [
+        "squeeze_breakout",
+        "relative_strength_guard",
+        "volatility_reset_breakout",
+        "lab_capitulation_reclaim_v1"
+      ]
+    },
+    {
+      "round": 4,
+      "top_strategy": "volatility_reset_breakout",
+      "top_score": 10.9108,
+      "top_holdout_return_pct": 13.8246,
+      "top_holdout_drawdown_pct": -6.6749,
+      "survivor_families": [
+        "squeeze_breakout",
+        "relative_strength_guard",
+        "volatility_reset_breakout",
+        "lab_capitulation_reclaim_v1"
+      ]
+    }
+  ],
+  "campaign_top_10": [
+    {
+      "rank": 1,
+      "strategy_name": "volatility_reset_breakout",
+      "candidate_id": "3426105f1f19",
+      "generation": 0,
+      "passes_activity_gate": true,
+      "campaign_score": -27.2523,
+      "avg_validation_return_pct": 21.7461,
+      "avg_holdout_return_pct": 36.7408,
+      "avg_holdout_trades": 62.6667,
+      "min_holdout_trades": 50,
+      "min_holdout_return_pct": 13.8246,
+      "worst_holdout_drawdown_pct": -18.227
+    },
+    {
+      "rank": 2,
+      "strategy_name": "relative_strength_guard",
+      "candidate_id": "0081dd0b687b",
+      "generation": 3,
+      "passes_activity_gate": true,
+      "campaign_score": -46.1998,
+      "avg_validation_return_pct": 61.2234,
+      "avg_holdout_return_pct": 73.297,
+      "avg_holdout_trades": 117.3333,
+      "min_holdout_trades": 89,
+      "min_holdout_return_pct": -0.2271,
+      "worst_holdout_drawdown_pct": -32.2238
+    },
+    {
+      "rank": 3,
+      "strategy_name": "relative_strength_guard",
+      "candidate_id": "346e53203ebc",
+      "generation": 2,
+      "passes_activity_gate": true,
+      "campaign_score": -52.5336,
+      "avg_validation_return_pct": 63.022,
+      "avg_holdout_return_pct": 70.9763,
+      "avg_holdout_trades": 124.6667,
+      "min_holdout_trades": 98,
+      "min_holdout_return_pct": -1.9396,
+      "worst_holdout_drawdown_pct": -31.3177
+    },
+    {
+      "rank": 4,
+      "strategy_name": "relative_strength_guard",
+      "candidate_id": "3cc9f3d67d46",
+      "generation": 4,
+      "passes_activity_gate": true,
+      "campaign_score": -57.4637,
+      "avg_validation_return_pct": 51.4265,
+      "avg_holdout_return_pct": 66.0763,
+      "avg_holdout_trades": 107.0,
+      "min_holdout_trades": 76,
+      "min_holdout_return_pct": -9.2625,
+      "worst_holdout_drawdown_pct": -31.3378
+    },
+    {
+      "rank": 5,
+      "strategy_name": "squeeze_breakout",
+      "candidate_id": "4e057624bf99",
+      "generation": 2,
+      "passes_activity_gate": true,
+      "campaign_score": -61.4114,
+      "avg_validation_return_pct": 7.3926,
+      "avg_holdout_return_pct": 5.7086,
+      "avg_holdout_trades": 64.3333,
+      "min_holdout_trades": 57,
+      "min_holdout_return_pct": -3.7283,
+      "worst_holdout_drawdown_pct": -47.705
+    },
+    {
+      "rank": 6,
+      "strategy_name": "squeeze_breakout",
+      "candidate_id": "a8dd9a04bb60",
+      "generation": 1,
+      "passes_activity_gate": true,
+      "campaign_score": -63.303,
+      "avg_validation_return_pct": 45.7634,
+      "avg_holdout_return_pct": 50.304,
+      "avg_holdout_trades": 70.3333,
+      "min_holdout_trades": 56,
+      "min_holdout_return_pct": 1.6849,
+      "worst_holdout_drawdown_pct": -35.5444
+    },
+    {
+      "rank": 7,
+      "strategy_name": "lab_guarded_drift_v1",
+      "candidate_id": "9e0aca0f8b42",
+      "generation": 0,
+      "passes_activity_gate": true,
+      "campaign_score": -71.3829,
+      "avg_validation_return_pct": 14.6039,
+      "avg_holdout_return_pct": 6.4719,
+      "avg_holdout_trades": 134.6667,
+      "min_holdout_trades": 101,
+      "min_holdout_return_pct": -19.2249,
+      "worst_holdout_drawdown_pct": -24.5812
+    },
+    {
+      "rank": 8,
+      "strategy_name": "relative_strength_guard",
+      "candidate_id": "1086a7f3fa65",
+      "generation": 1,
+      "passes_activity_gate": true,
+      "campaign_score": -72.9037,
+      "avg_validation_return_pct": 58.0119,
+      "avg_holdout_return_pct": 61.0196,
+      "avg_holdout_trades": 154.3333,
+      "min_holdout_trades": 146,
+      "min_holdout_return_pct": -10.3856,
+      "worst_holdout_drawdown_pct": -31.6877
+    },
+    {
+      "rank": 9,
+      "strategy_name": "lab_range_rebound_v1",
+      "candidate_id": "fac855ce28b3",
+      "generation": 0,
+      "passes_activity_gate": true,
+      "campaign_score": -82.3836,
+      "avg_validation_return_pct": -18.7408,
+      "avg_holdout_return_pct": -15.9084,
+      "avg_holdout_trades": 85.3333,
+      "min_holdout_trades": 74,
+      "min_holdout_return_pct": -22.8813,
+      "worst_holdout_drawdown_pct": -24.5718
+    },
+    {
+      "rank": 10,
+      "strategy_name": "relative_strength_guard",
+      "candidate_id": "2204456136c2",
+      "generation": 0,
+      "passes_activity_gate": true,
+      "campaign_score": -89.3008,
+      "avg_validation_return_pct": 48.9652,
+      "avg_holdout_return_pct": 56.6326,
+      "avg_holdout_trades": 174.6667,
+      "min_holdout_trades": 156,
+      "min_holdout_return_pct": -16.1221,
+      "worst_holdout_drawdown_pct": -33.5626
+    }
+  ],
+  "campaign_top_10_family_counts": {
+    "volatility_reset_breakout": 1,
+    "relative_strength_guard": 5,
+    "squeeze_breakout": 2,
+    "lab_guarded_drift_v1": 1,
+    "lab_range_rebound_v1": 1
+  }
+}

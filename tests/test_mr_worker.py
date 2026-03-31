@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from types import MethodType
 
 import pandas as pd
 
 from src.execution import resolve_submitted_order
 from src.kill_switch import save_kill_switch
-from src.mr_worker import MRMonitor, fetch_top_markets, normalize_market_codes
+from src.mr_worker import MRMonitor, _strategy_params_from_args, fetch_top_markets, normalize_market_codes
 from src.runtime_store import load_runtime_state
 
 
@@ -249,6 +250,30 @@ class MyOrderEventAPI(FakeAPI):
                 return None
 
         return _DummyThread()
+
+
+def test_strategy_params_from_args_supports_volatility_reset_breakout():
+    params = _strategy_params_from_args(
+        Namespace(
+            strategy="volatility_reset_breakout",
+            fast_ema=12,
+            slow_ema=48,
+            bb_len=25,
+            bb_mult=2.1,
+            breakout_window=15,
+            reset_window=3,
+            atr_window=12,
+            atr_mult=1.5,
+            volume_window=25,
+            volume_threshold=0.97,
+            spike_window=22,
+            spike_quantile=0.91,
+        )
+    )
+
+    assert params["reset_window"] == 3
+    assert params["spike_window"] == 22
+    assert params["spike_quantile"] == 0.91
 
 
 def _signal_frame(*, buy: bool = False, sell: bool = False, close: float = 100.0) -> pd.DataFrame:

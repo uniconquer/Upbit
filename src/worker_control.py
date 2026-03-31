@@ -13,10 +13,12 @@ from typing import Any, Mapping
 try:
     from kill_switch import effective_kill_switch
     from runtime_store import load_runtime_state, runtime_dir, save_runtime_state
+    from strategy import VOLATILITY_RESET_BREAKOUT_DEFAULTS
     from strategy_engine import strategy_label
 except ImportError:
     from src.kill_switch import effective_kill_switch
     from src.runtime_store import load_runtime_state, runtime_dir, save_runtime_state
+    from src.strategy import VOLATILITY_RESET_BREAKOUT_DEFAULTS
     from src.strategy_engine import strategy_label
 
 
@@ -153,6 +155,7 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "fast_ema": _to_int(os.getenv("UPBIT_WORKER_FAST_EMA"), 21),
         "slow_ema": _to_int(os.getenv("UPBIT_WORKER_SLOW_EMA"), 55),
         "breakout_window": _to_int(os.getenv("UPBIT_WORKER_BREAKOUT_WINDOW"), 20),
+        "reset_window": _to_int(os.getenv("UPBIT_WORKER_RESET_WINDOW"), int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["reset_window"])),
         "exit_window": _to_int(os.getenv("UPBIT_WORKER_EXIT_WINDOW"), 10),
         "atr_window": _to_int(os.getenv("UPBIT_WORKER_ATR_WINDOW"), 14),
         "atr_mult": _to_float(os.getenv("UPBIT_WORKER_ATR_MULT"), 2.5),
@@ -161,6 +164,8 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "momentum_window": _to_int(os.getenv("UPBIT_WORKER_MOMENTUM_WINDOW"), 20),
         "volume_window": _to_int(os.getenv("UPBIT_WORKER_VOLUME_WINDOW"), 20),
         "volume_threshold": _to_float(os.getenv("UPBIT_WORKER_VOLUME_THRESHOLD"), 0.9),
+        "spike_window": _to_int(os.getenv("UPBIT_WORKER_SPIKE_WINDOW"), int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["spike_window"])),
+        "spike_quantile": _to_float(os.getenv("UPBIT_WORKER_SPIKE_QUANTILE"), float(VOLATILITY_RESET_BREAKOUT_DEFAULTS["spike_quantile"])),
         "rsi_len": _to_int(os.getenv("UPBIT_WORKER_RSI_LEN"), 14),
         "oversold": _to_float(os.getenv("UPBIT_WORKER_OVERSOLD"), 30.0),
         "bb_len": _to_int(os.getenv("UPBIT_WORKER_BB_LEN"), 20),
@@ -236,11 +241,13 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "fast_ema",
         "slow_ema",
         "breakout_window",
+        "reset_window",
         "exit_window",
         "atr_window",
         "adx_window",
         "momentum_window",
         "volume_window",
+        "spike_window",
         "rsi_len",
         "bb_len",
         "min_down_bars",
@@ -265,6 +272,7 @@ def coerce_worker_config(raw: Mapping[str, Any] | None = None) -> dict[str, Any]
         "atr_mult": defaults["atr_mult"],
         "adx_threshold": defaults["adx_threshold"],
         "volume_threshold": defaults["volume_threshold"],
+        "spike_quantile": defaults["spike_quantile"],
         "oversold": defaults["oversold"],
         "bb_mult": defaults["bb_mult"],
         "low_tolerance_pct": defaults["low_tolerance_pct"],
@@ -431,6 +439,35 @@ def build_worker_command(config: Mapping[str, Any]) -> list[str]:
                 str(cfg["entry_score"]),
                 "--exit-score",
                 str(cfg["exit_score"]),
+            ]
+        )
+    elif cfg["strategy"] == "volatility_reset_breakout":
+        command.extend(
+            [
+                "--fast-ema",
+                str(cfg["fast_ema"]),
+                "--slow-ema",
+                str(cfg["slow_ema"]),
+                "--bb-len",
+                str(cfg["bb_len"]),
+                "--bb-mult",
+                str(cfg["bb_mult"]),
+                "--breakout-window",
+                str(cfg["breakout_window"]),
+                "--reset-window",
+                str(cfg["reset_window"]),
+                "--atr-window",
+                str(cfg["atr_window"]),
+                "--atr-mult",
+                str(cfg["atr_mult"]),
+                "--volume-window",
+                str(cfg["volume_window"]),
+                "--volume-threshold",
+                str(cfg["volume_threshold"]),
+                "--spike-window",
+                str(cfg["spike_window"]),
+                "--spike-quantile",
+                str(cfg["spike_quantile"]),
             ]
         )
     else:

@@ -103,6 +103,34 @@ def test_build_worker_command_includes_relative_strength_args():
     assert "1.5" in command
 
 
+def test_build_worker_command_includes_volatility_reset_breakout_args():
+    command = build_worker_command(
+        {
+            "strategy": "volatility_reset_breakout",
+            "fast_ema": 12,
+            "slow_ema": 48,
+            "bb_len": 25,
+            "bb_mult": 2.1,
+            "breakout_window": 15,
+            "reset_window": 3,
+            "atr_window": 12,
+            "atr_mult": 1.5,
+            "volume_window": 25,
+            "volume_threshold": 0.97,
+            "spike_window": 22,
+            "spike_quantile": 0.91,
+        }
+    )
+
+    assert "volatility_reset_breakout" in command
+    assert "--reset-window" in command
+    assert "3" in command
+    assert "--spike-window" in command
+    assert "22" in command
+    assert "--spike-quantile" in command
+    assert "0.91" in command
+
+
 def test_build_worker_command_includes_flux_ema_filter_args():
     command = build_worker_command(
         {

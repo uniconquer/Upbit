@@ -30,7 +30,7 @@ from notification_text import (
 from paper_trader import PaperTrader
 from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
 from runtime_store import load_runtime_state, save_runtime_state
-from strategy import backtest_signal_frame
+from strategy import VOLATILITY_RESET_BREAKOUT_DEFAULTS, backtest_signal_frame
 from strategy_engine import build_strategy_frame, strategy_description, strategy_label, strategy_options
 from startup_automation import (
     format_startup_status_bundle,
@@ -61,6 +61,7 @@ _MARKETS_CACHE = {"data": None, "ts": 0.0}
 _CANDLES_CACHE: dict[tuple[str, str, int], dict[str, object]] = {}
 LIVE_RUNTIME_STATE = "live-desk"
 LIVE_KILL_SWITCH_NAME = "trade-kill-switch"
+LIVE_SIM_DEFAULT_STRATEGY = "volatility_reset_breakout"
 LIVE_PARAM_WIDGETS = {
     "interval": "live_interval",
     "count": "live_count",
@@ -88,6 +89,7 @@ LIVE_PARAM_WIDGETS = {
     "rs_long_window": "live_rs_long_window",
     "trend_ema_window": "live_trend_ema_window",
     "breakout_window": "live_breakout",
+    "reset_window": "live_reset_window",
     "exit_window": "live_exit",
     "atr_window": "live_atr_window",
     "atr_mult": "live_atr_mult",
@@ -98,6 +100,8 @@ LIVE_PARAM_WIDGETS = {
     "momentum_window": "live_momentum",
     "volume_window": "live_volume_window",
     "volume_threshold": "live_volume_threshold",
+    "spike_window": "live_spike_window",
+    "spike_quantile": "live_spike_quantile",
     "ltf_len": "live_ltf_len",
     "ltf_mult": "live_ltf_mult",
     "htf_len": "live_htf_len",
@@ -513,6 +517,22 @@ def _current_signal(last_row: pd.Series) -> str:
     return "WAIT"
 
 
+def _resolve_strategy_default(prefix: str, options: list[str], current: object) -> str:
+    selected = str(current or "").strip()
+    if selected in options:
+        return selected
+    if prefix == "live" and LIVE_SIM_DEFAULT_STRATEGY in options:
+        return LIVE_SIM_DEFAULT_STRATEGY
+    return options[0]
+
+
+def _live_strategy_options() -> list[str]:
+    options = strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
+    if LIVE_SIM_DEFAULT_STRATEGY not in options:
+        options.append(LIVE_SIM_DEFAULT_STRATEGY)
+    return options
+
+
 def _ensure_lock():
     if "LIVE_LOCK" not in st.session_state:
         st.session_state["LIVE_LOCK"] = threading.Lock()
@@ -713,6 +733,7 @@ def _managed_worker_config_from_live_params(params: dict) -> dict:
         "rs_long_window",
         "trend_ema_window",
         "breakout_window",
+        "reset_window",
         "exit_window",
         "atr_window",
         "atr_mult",
@@ -723,6 +744,8 @@ def _managed_worker_config_from_live_params(params: dict) -> dict:
         "momentum_window",
         "volume_window",
         "volume_threshold",
+        "spike_window",
+        "spike_quantile",
         "ltf_len",
         "ltf_mult",
         "htf_len",
@@ -1514,8 +1537,8 @@ class _Worker:
 
 
 def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
-    options = strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
-    current = st.session_state.get(f"{prefix}_strategy_name", options[0])
+    options = _live_strategy_options() if prefix == "live" else strategy_options(flux_indicator is not None, flux_indicator_with_ema is not None)
+    current = _resolve_strategy_default(prefix, options, st.session_state.get(f"{prefix}_strategy_name"))
     index = options.index(current) if current in options else 0
     strategy_name = st.selectbox("전략", options, index=index, format_func=strategy_label, key=f"{prefix}_strategy_name")
     st.caption(strategy_description(strategy_name))
@@ -1569,6 +1592,24 @@ def _strategy_controls(prefix: str) -> tuple[str, dict[str, float | int | str]]:
             params["volume_threshold"] = row3[0].number_input("거래량 비율", 0.1, 3.0, 0.9, 0.1, key=f"{prefix}_volume_threshold")
             params["entry_score"] = row3[1].number_input("진입 점수", -20.0, 40.0, 8.0, 0.5, key=f"{prefix}_entry_score")
             params["exit_score"] = row3[2].number_input("청산 점수", -20.0, 40.0, 2.0, 0.5, key=f"{prefix}_exit_score")
+    elif strategy_name == "volatility_reset_breakout":
+        defaults = VOLATILITY_RESET_BREAKOUT_DEFAULTS
+        with st.expander("Volatility reset breakout 설정", expanded=False):
+            row1 = st.columns(4)
+            params["fast_ema"] = row1[0].number_input("빠른 EMA", 3, 120, int(defaults["fast_ema"]), 1, key=f"{prefix}_fast_ema")
+            params["slow_ema"] = row1[1].number_input("느린 EMA", 8, 240, int(defaults["slow_ema"]), 1, key=f"{prefix}_slow_ema")
+            params["bb_len"] = row1[2].number_input("BB 길이", 5, 80, int(defaults["bb_len"]), 1, key=f"{prefix}_bb_len")
+            params["bb_mult"] = row1[3].number_input("BB 배수", 0.5, 5.0, float(defaults["bb_mult"]), 0.1, key=f"{prefix}_bb_mult")
+            row2 = st.columns(4)
+            params["breakout_window"] = row2[0].number_input("돌파 창", 3, 80, int(defaults["breakout_window"]), 1, key=f"{prefix}_breakout")
+            params["reset_window"] = row2[1].number_input("리셋 바 수", 1, 20, int(defaults["reset_window"]), 1, key=f"{prefix}_reset_window")
+            params["atr_window"] = row2[2].number_input("ATR 창", 3, 50, int(defaults["atr_window"]), 1, key=f"{prefix}_atr_window")
+            params["atr_mult"] = row2[3].number_input("ATR 배수", 0.5, 5.0, float(defaults["atr_mult"]), 0.1, key=f"{prefix}_atr_mult")
+            row3 = st.columns(4)
+            params["volume_window"] = row3[0].number_input("거래량 창", 3, 80, int(defaults["volume_window"]), 1, key=f"{prefix}_volume_window")
+            params["volume_threshold"] = row3[1].number_input("거래량 비율", 0.1, 3.0, float(defaults["volume_threshold"]), 0.05, key=f"{prefix}_volume_threshold")
+            params["spike_window"] = row3[2].number_input("스파이크 창", 3, 80, int(defaults["spike_window"]), 1, key=f"{prefix}_spike_window")
+            params["spike_quantile"] = row3[3].number_input("스파이크 기준 quantile", 0.05, 0.99, float(defaults["spike_quantile"]), 0.01, format="%.2f", key=f"{prefix}_spike_quantile")
     elif strategy_name == "flux_trend":
         with st.expander("플럭스 추세 밴드 설정", expanded=False):
             row = st.columns(5)

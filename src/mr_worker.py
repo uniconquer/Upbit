@@ -45,7 +45,7 @@ try:
     from power_keepawake import SystemAwakeGuard
     from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
     from runtime_store import load_runtime_state, save_runtime_state
-    from strategy import backtest_signal_frame
+    from strategy import VOLATILITY_RESET_BREAKOUT_DEFAULTS, backtest_signal_frame
     from strategy_engine import build_strategy_frame, strategy_label
     from trading_costs import TradingCostModel, cost_model_from_values
     from upbit_api import UpbitAPI
@@ -82,7 +82,7 @@ except ImportError:
     from src.power_keepawake import SystemAwakeGuard
     from src.risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
     from src.runtime_store import load_runtime_state, save_runtime_state
-    from src.strategy import backtest_signal_frame
+    from src.strategy import VOLATILITY_RESET_BREAKOUT_DEFAULTS, backtest_signal_frame
     from src.strategy_engine import build_strategy_frame, strategy_label
     from src.trading_costs import TradingCostModel, cost_model_from_values
     from src.upbit_api import UpbitAPI
@@ -238,6 +238,21 @@ def _strategy_params_from_args(args) -> dict[str, Any]:
             "volume_threshold": args.volume_threshold,
             "entry_score": args.entry_score,
             "exit_score": args.exit_score,
+        }
+    if args.strategy == "volatility_reset_breakout":
+        return {
+            "fast_ema": args.fast_ema,
+            "slow_ema": args.slow_ema,
+            "bb_len": args.bb_len,
+            "bb_mult": args.bb_mult,
+            "breakout_window": args.breakout_window,
+            "reset_window": args.reset_window,
+            "atr_window": args.atr_window,
+            "atr_mult": args.atr_mult,
+            "volume_window": args.volume_window,
+            "volume_threshold": args.volume_threshold,
+            "spike_window": args.spike_window,
+            "spike_quantile": args.spike_quantile,
         }
     if args.strategy == "flux_trend":
         return {
@@ -1117,7 +1132,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Strategy monitor for Upbit")
     parser.add_argument(
         "--strategy",
-        choices=["research_trend", "rsi_bb_double_bottom", "relative_strength_rotation", "flux_trend", "flux_ema_filter"],
+        choices=["research_trend", "rsi_bb_double_bottom", "relative_strength_rotation", "volatility_reset_breakout", "flux_trend", "flux_ema_filter"],
         default="research_trend",
     )
     parser.add_argument("--interval", default="minute30")
@@ -1152,6 +1167,7 @@ def parse_args():
     parser.add_argument("--fast-ema", type=int, default=21)
     parser.add_argument("--slow-ema", type=int, default=55)
     parser.add_argument("--breakout-window", type=int, default=20)
+    parser.add_argument("--reset-window", type=int, default=int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["reset_window"]))
     parser.add_argument("--exit-window", type=int, default=10)
     parser.add_argument("--atr-window", type=int, default=14)
     parser.add_argument("--atr-mult", type=float, default=2.5)
@@ -1160,6 +1176,8 @@ def parse_args():
     parser.add_argument("--momentum-window", type=int, default=20)
     parser.add_argument("--volume-window", type=int, default=20)
     parser.add_argument("--volume-threshold", type=float, default=0.9)
+    parser.add_argument("--spike-window", type=int, default=int(VOLATILITY_RESET_BREAKOUT_DEFAULTS["spike_window"]))
+    parser.add_argument("--spike-quantile", type=float, default=float(VOLATILITY_RESET_BREAKOUT_DEFAULTS["spike_quantile"]))
     parser.add_argument("--rsi-len", type=int, default=14)
     parser.add_argument("--oversold", type=float, default=30.0)
     parser.add_argument("--bb-len", type=int, default=20)

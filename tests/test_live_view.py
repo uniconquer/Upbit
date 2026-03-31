@@ -12,6 +12,7 @@ from src.views.live_view import (
     _normalize_market_codes,
     _resolve_execution_guard,
     _resolve_live_scan_action,
+    _resolve_strategy_default,
 )
 
 
@@ -61,6 +62,26 @@ def test_live_scan_action_does_nothing_while_worker_running():
     )
 
     assert action == "none"
+
+
+def test_strategy_default_prefers_champion_for_live_prefix():
+    strategy = _resolve_strategy_default(
+        "live",
+        ["research_trend", "relative_strength_rotation", "volatility_reset_breakout"],
+        None,
+    )
+
+    assert strategy == "volatility_reset_breakout"
+
+
+def test_strategy_default_keeps_existing_selection_when_valid():
+    strategy = _resolve_strategy_default(
+        "live",
+        ["research_trend", "relative_strength_rotation", "volatility_reset_breakout"],
+        "relative_strength_rotation",
+    )
+
+    assert strategy == "relative_strength_rotation"
 
 
 def test_execution_guard_prefers_background_worker_for_live_execution():
