@@ -173,6 +173,7 @@ class CampaignCandidateResult:
     candidate: CandidateSpec
     window_results: list[CandidateResult]
     campaign_score: float
+    passes_activity_gate: bool
     avg_validation_return_pct: float
     avg_holdout_return_pct: float
     avg_holdout_trades: float
@@ -193,6 +194,7 @@ class CampaignCandidateResult:
             "generation": self.candidate.generation,
             "parent_id": self.candidate.parent_id,
             "campaign_score": self.campaign_score,
+            "passes_activity_gate": self.passes_activity_gate,
             "avg_validation_return_pct": self.avg_validation_return_pct,
             "avg_holdout_return_pct": self.avg_holdout_return_pct,
             "avg_holdout_trades": self.avg_holdout_trades,
@@ -229,10 +231,12 @@ class LabConfig:
     parents_per_track: int = 2
     offspring_per_parent: int = 4
     inventions_per_round: int = 4
+    invent_exploration_slots: int = 1
     max_family_survivors: int = 1
     max_family_offspring: int = 3
     seed_replay_count: int = 4
     campaign_avg_holdout_trade_floor: float = 1.0
+    campaign_min_holdout_trades: int = 1
     campaign_zero_holdout_window_penalty: float = 1.5
     campaign_trade_penalty_weight: float = 3.0
     random_seed: int = 7
@@ -1073,6 +1077,9 @@ def select_survivors(
             and result.holdout.return_pct > -20.0
         )
 
+    def passes_activity_gate(result: CandidateResult) -> bool:
+        return result.holdout.trades >= max(0, config.campaign_min_holdout_trades)
+
     selected: list[CandidateSpec] = []
     seen: set[str] = set()
     family_counts: dict[str, int] = {}
@@ -1087,39 +1094,65 @@ def select_survivors(
         family = _candidate_family(candidate)
         return family_counts.get(family, 0) < max(1, config.max_family_survivors)
 
+    def try_add_result(result: CandidateResult, *, enforce_family: bool = True) -> bool:
+        if result.candidate.candidate_id in seen:
+            return False
+        if enforce_family and not family_open(result.candidate):
+            return False
+        add_candidate(result.candidate)
+        return True
+
     for track in ("improve", "invent"):
         track_pool = [result for result in ranked if result.candidate.track == track]
         preferred = [result for result in track_pool if passes_survival_floor(result)]
+        gated_preferred = [result for result in preferred if passes_activity_gate(result)]
+        gated_track = [result for result in track_pool if passes_activity_gate(result)]
         track_results = preferred or track_pool
         track_selected = 0
-        for result in track_results:
-            if track_selected >= max(1, config.parents_per_track):
+        required = max(1, config.parents_per_track)
+        exploration_slots = min(max(0, config.invent_exploration_slots), required) if track == "invent" else 0
+        gated_target = max(0, required - exploration_slots)
+
+        for result in gated_preferred:
+            if track_selected >= gated_target:
                 break
-            if result.candidate.candidate_id in seen or not family_open(result.candidate):
-                continue
-            add_candidate(result.candidate)
-            track_selected += 1
-        if track_selected >= max(1, config.parents_per_track):
-            continue
-        for result in track_results:
-            if track_selected >= max(1, config.parents_per_track):
+            if try_add_result(result):
+                track_selected += 1
+
+        if track == "invent" and track_selected < required:
+            exploration_selected = 0
+            exploration_pool = [result for result in track_results if not passes_activity_gate(result)]
+            for result in exploration_pool:
+                if track_selected >= required or exploration_selected >= exploration_slots:
+                    break
+                if try_add_result(result):
+                    track_selected += 1
+                    exploration_selected += 1
+
+        for pool in (gated_preferred, gated_track):
+            if track_selected >= required:
                 break
-            if result.candidate.candidate_id in seen:
-                continue
-            add_candidate(result.candidate)
-            track_selected += 1
+            for result in pool:
+                if track_selected >= required:
+                    break
+                if try_add_result(result):
+                    track_selected += 1
     total_target = max(2, config.parents_per_track * 2)
     for result in ranked:
         if len(selected) >= total_target:
             break
         if result.candidate.candidate_id in seen:
             continue
-        if not passes_survival_floor(result) or not family_open(result.candidate):
+        if (
+            not passes_survival_floor(result)
+            or not passes_activity_gate(result)
+            or not family_open(result.candidate)
+        ):
             continue
         add_candidate(result.candidate)
-    if len(selected) < total_target:
+    if len(selected) < 2:
         for result in ranked:
-            if len(selected) >= total_target:
+            if len(selected) >= 2:
                 break
             if result.candidate.candidate_id in seen:
                 continue
@@ -1272,6 +1305,7 @@ def evaluate_candidate_campaign(
     min_validation_return = min(validation_returns) if validation_returns else 0.0
     min_holdout_return = min(holdout_returns) if holdout_returns else 0.0
     inactive_windows = sum(1 for trades in holdout_trades if trades <= 0)
+    passes_activity_gate = min_holdout_trades >= config.campaign_min_holdout_trades
     campaign_score = (
         (avg_score * 0.55)
         + (min_score * 0.45)
@@ -1285,6 +1319,7 @@ def evaluate_candidate_campaign(
         candidate=candidate,
         window_results=window_results,
         campaign_score=campaign_score,
+        passes_activity_gate=passes_activity_gate,
         avg_validation_return_pct=avg_validation_return,
         avg_holdout_return_pct=avg_holdout_return,
         avg_holdout_trades=avg_holdout_trades,
@@ -1299,6 +1334,7 @@ def rank_campaign_candidates(results: Sequence[CampaignCandidateResult]) -> list
     ranked = sorted(
         results,
         key=lambda item: (
+            item.passes_activity_gate,
             item.campaign_score,
             item.min_holdout_return_pct,
             item.avg_holdout_return_pct,

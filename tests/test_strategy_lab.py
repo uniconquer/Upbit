@@ -370,6 +370,58 @@ def test_select_survivors_prefers_family_diversity_when_possible():
     assert len(survivor_families) >= 2
 
 
+def test_select_survivors_enforces_activity_gate_but_keeps_invent_exploration_slot():
+    ranked = [
+        CandidateResult(
+            candidate=CandidateSpec("improve-inactive", "improve", "engine", "relative_strength_guard"),
+            train=SplitMetrics(10000, 11500, 15.0, -4.0, 55.0, 10, 5, 5, 0),
+            validation=SplitMetrics(10000, 11400, 14.0, -4.5, 55.0, 10, 5, 5, 0),
+            holdout=SplitMetrics(10000, 11300, 13.0, -4.0, 60.0, 0, 0, 0, 0),
+            holdout_weighted_score=9.0,
+            overfit_gap_pct=0.0,
+            rank=1,
+        ),
+        CandidateResult(
+            candidate=CandidateSpec("invent-inactive", "invent", "lab", "lab_capitulation_reclaim_v1"),
+            train=SplitMetrics(10000, 11200, 12.0, -4.0, 55.0, 8, 4, 4, 0),
+            validation=SplitMetrics(10000, 11100, 11.0, -4.5, 55.0, 8, 4, 4, 0),
+            holdout=SplitMetrics(10000, 11000, 10.0, -4.0, 60.0, 0, 0, 0, 0),
+            holdout_weighted_score=8.0,
+            overfit_gap_pct=0.0,
+            rank=2,
+        ),
+        CandidateResult(
+            candidate=CandidateSpec("improve-active", "improve", "engine", "squeeze_breakout"),
+            train=SplitMetrics(10000, 10800, 8.0, -5.0, 50.0, 8, 4, 4, 0),
+            validation=SplitMetrics(10000, 10700, 7.0, -5.0, 52.0, 8, 4, 4, 0),
+            holdout=SplitMetrics(10000, 10600, 6.0, -4.0, 55.0, 4, 2, 2, 0),
+            holdout_weighted_score=7.0,
+            overfit_gap_pct=0.0,
+            rank=3,
+        ),
+        CandidateResult(
+            candidate=CandidateSpec("invent-active", "invent", "lab", "lab_guarded_drift_v1"),
+            train=SplitMetrics(10000, 10500, 5.0, -5.0, 50.0, 8, 4, 4, 0),
+            validation=SplitMetrics(10000, 10400, 4.0, -5.0, 52.0, 8, 4, 4, 0),
+            holdout=SplitMetrics(10000, 10300, 3.0, -4.0, 55.0, 5, 2, 2, 0),
+            holdout_weighted_score=6.0,
+            overfit_gap_pct=0.0,
+            rank=4,
+        ),
+    ]
+
+    survivors = select_survivors(
+        ranked,
+        config=LabConfig(parents_per_track=2, invent_exploration_slots=1, max_family_survivors=2),
+    )
+    survivor_ids = {candidate.candidate_id for candidate in survivors}
+
+    assert "improve-active" in survivor_ids
+    assert "improve-inactive" not in survivor_ids
+    assert "invent-active" in survivor_ids
+    assert "invent-inactive" in survivor_ids
+
+
 def test_evaluate_candidate_campaign_aggregates_and_ranks_windows(monkeypatch):
     raw = {"KRW-A": _sample_ohlcv()}
     windows = [
@@ -461,12 +513,20 @@ def test_evaluate_candidate_campaign_penalizes_inactive_holdout_windows(monkeypa
     ]
 
     def fake_evaluate(candidate, *_args, **_kwargs):
-        holdout_trades = 0 if candidate.strategy_name == "inactive_family" else 3
+        if candidate.strategy_name == "inactive_family":
+            return CandidateResult(
+                candidate,
+                SplitMetrics(10000, 10600, 6.0, -1.0, 60.0, 4, 2, 2, 0),
+                SplitMetrics(10000, 10700, 7.0, -1.0, 65.0, 4, 2, 2, 0),
+                SplitMetrics(10000, 10500, 5.0, -1.0, 70.0, 0, 0, 0, 0),
+                10.0,
+                0.0,
+            )
         return CandidateResult(
             candidate,
             SplitMetrics(10000, 10200, 2.0, -2.0, 50.0, 4, 2, 2, 0),
             SplitMetrics(10000, 10300, 3.0, -2.5, 55.0, 4, 2, 2, 0),
-            SplitMetrics(10000, 10100, 1.0, -1.0, 60.0, holdout_trades, holdout_trades // 2, holdout_trades // 2, 0),
+            SplitMetrics(10000, 10100, 1.0, -1.0, 60.0, 3, 1, 1, 0),
             1.5,
             0.0,
         )
@@ -490,8 +550,10 @@ def test_evaluate_candidate_campaign_penalizes_inactive_holdout_windows(monkeypa
 
     assert inactive.avg_holdout_trades == 0.0
     assert inactive.min_holdout_trades == 0
+    assert not inactive.passes_activity_gate
     assert active.avg_holdout_trades == 3.0
-    assert active.campaign_score > inactive.campaign_score
+    assert active.passes_activity_gate
+    assert inactive.campaign_score > active.campaign_score
     assert ranked[0].candidate.strategy_name == "active_family"
 
 
