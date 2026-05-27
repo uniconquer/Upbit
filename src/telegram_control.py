@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 try:
     from kill_switch import save_kill_switch
+    from power_keepawake import SystemAwakeGuard
     from runtime_store import load_runtime_state, save_runtime_state
     from worker_control import (
         TELEGRAM_CONTROL_OFFSET_STATE,
@@ -24,6 +25,7 @@ try:
     )
 except ImportError:
     from src.kill_switch import save_kill_switch
+    from src.power_keepawake import SystemAwakeGuard
     from src.runtime_store import load_runtime_state, save_runtime_state
     from src.worker_control import (
         TELEGRAM_CONTROL_OFFSET_STATE,
@@ -49,6 +51,117 @@ HELP_TEXT = "\n".join(
         "/ping - 봇 연결 확인",
     ]
 )
+TELEGRAM_CONTROL_PROCESS_STATE = "telegram-control-process"
+
+
+def _process_exists(pid: Any) -> bool:
+    try:
+        resolved = int(pid or 0)
+    except Exception:
+        return False
+    if resolved <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import subprocess
+
+            probe = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {resolved}", "/FO", "CSV", "/NH"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            output = (probe.stdout or "").strip()
+            return bool(output) and "No tasks are running" not in output and f'"{resolved}"' in output
+        except Exception:
+            return False
+    try:
+        os.kill(resolved, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def _load_process_state() -> dict[str, Any]:
+    raw = load_runtime_state(TELEGRAM_CONTROL_PROCESS_STATE, default={})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _save_process_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    snapshot = dict(state or {})
+    save_runtime_state(TELEGRAM_CONTROL_PROCESS_STATE, snapshot)
+    return snapshot
+
+
+def _refresh_process_state() -> dict[str, Any]:
+    state = _load_process_state()
+    pid = state.get("pid")
+    running = _process_exists(pid)
+    if running:
+        state["running"] = True
+        state["status"] = "running"
+    else:
+        state["running"] = False
+        state["status"] = "stopped" if state else "stopped"
+        if state.get("pid"):
+            state.setdefault("stopped_at", time.time())
+    if state:
+        _save_process_state(state)
+    return state
+
+
+def _claim_process() -> bool:
+    current_pid = os.getpid()
+    state = _refresh_process_state()
+    existing_pid = int(state.get("pid") or 0) if state.get("pid") else 0
+    if state.get("running") and existing_pid and existing_pid != current_pid:
+        return False
+    _save_process_state(
+        {
+            **state,
+            "pid": current_pid,
+            "running": True,
+            "status": "running",
+            "started_at": float(state.get("started_at") or time.time()),
+            "last_seen_at": time.time(),
+        }
+    )
+    return True
+
+
+def _touch_process(offset: int) -> None:
+    current_pid = os.getpid()
+    state = _load_process_state()
+    if int(state.get("pid") or 0) not in {0, current_pid}:
+        return
+    _save_process_state(
+        {
+            **state,
+            "pid": current_pid,
+            "running": True,
+            "status": "running",
+            "last_seen_at": time.time(),
+            "offset": int(offset),
+        }
+    )
+
+
+def _release_process() -> None:
+    current_pid = os.getpid()
+    state = _load_process_state()
+    if int(state.get("pid") or 0) not in {0, current_pid}:
+        return
+    _save_process_state(
+        {
+            **state,
+            "pid": current_pid,
+            "running": False,
+            "status": "stopped",
+            "stopped_at": time.time(),
+        }
+    )
 
 
 def _telegram_api(token: str, method: str, payload: Mapping[str, Any], *, timeout: int = 30) -> dict[str, Any]:
@@ -163,34 +276,45 @@ def run_control_loop(*, poll_timeout: int = 25) -> None:
     allowed_chat_id = str(os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if not token or not allowed_chat_id:
         raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required.")
+    if not _claim_process():
+        print("[telegram-control] already running")
+        return
 
+    awake_guard = SystemAwakeGuard(enabled=True)
     delete_webhook(token)
     offset = _load_offset()
     print("[telegram-control] polling started")
-    while True:
-        try:
-            updates = get_updates(token, offset=offset, timeout=poll_timeout)
-            for update in updates:
-                update_id = int(update.get("update_id") or 0)
-                if update_id >= offset:
-                    offset = update_id + 1
-                    _save_offset(offset)
-                message = _extract_message(update)
-                if not message:
-                    continue
-                chat = dict(message.get("chat") or {})
-                chat_id = str(chat.get("id") or "").strip()
-                if chat_id != allowed_chat_id:
-                    continue
-                text = str(message.get("text") or "").strip()
-                reply = handle_command(text)
-                if reply:
-                    send_message(token, allowed_chat_id, reply)
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:
-            print(f"[telegram-control] poll error: {exc}")
-            time.sleep(3.0)
+    awake_guard.acquire()
+    try:
+        while True:
+            try:
+                _touch_process(offset)
+                updates = get_updates(token, offset=offset, timeout=poll_timeout)
+                for update in updates:
+                    update_id = int(update.get("update_id") or 0)
+                    if update_id >= offset:
+                        offset = update_id + 1
+                        _save_offset(offset)
+                    message = _extract_message(update)
+                    if not message:
+                        continue
+                    chat = dict(message.get("chat") or {})
+                    chat_id = str(chat.get("id") or "").strip()
+                    if chat_id != allowed_chat_id:
+                        continue
+                    text = str(message.get("text") or "").strip()
+                    reply = handle_command(text)
+                    if reply:
+                        send_message(token, allowed_chat_id, reply)
+                _touch_process(offset)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"[telegram-control] poll error: {exc}")
+                time.sleep(3.0)
+    finally:
+        awake_guard.release()
+        _release_process()
 
 
 def parse_args() -> argparse.Namespace:

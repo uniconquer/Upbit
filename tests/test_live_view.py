@@ -8,6 +8,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from src.views.live_view import (
+    _Worker,
     _filter_ranked_markets,
     _normalize_market_codes,
     _resolve_execution_guard,
@@ -110,3 +111,60 @@ def test_filter_ranked_markets_hides_excluded_symbols():
     filtered = _filter_ranked_markets(ranked, ["KRW-BTC", "xrp"])
 
     assert filtered["market"].tolist() == ["KRW-DOGE"]
+
+
+def test_page_worker_holds_system_awake_while_running(monkeypatch):
+    calls: list[str] = []
+
+    class FakeGuard:
+        def __init__(self, *, enabled: bool = True):
+            self.enabled = enabled
+            self.active = False
+
+        def acquire(self) -> bool:
+            calls.append("acquire")
+            self.active = True
+            return True
+
+        def release(self) -> bool:
+            calls.append("release")
+            self.active = False
+            return True
+
+    class FakeNotifier:
+        @staticmethod
+        def available() -> bool:
+            return False
+
+    monkeypatch.setattr("src.views.live_view.SystemAwakeGuard", FakeGuard)
+    monkeypatch.setattr("src.views.live_view.get_notifier", lambda: FakeNotifier())
+    monkeypatch.setattr("src.views.live_view._persist_live_runtime", lambda *args, **kwargs: None)
+
+    worker = _Worker()
+
+    def fake_scan_core(params, last_state):
+        worker.stop_event.set()
+        return {
+            "table": pd.DataFrame(),
+            "detail": {},
+            "notify": [],
+            "_metrics": {},
+            "_positions": {},
+            "_pending_orders": {},
+            "_daily_reports": {},
+            "_last_daily_report_day": None,
+            "_exchange_synced": False,
+            "_exchange_sync_due_at": 0.0,
+            "last_sig": {},
+            "trades": [],
+            "last_run": 123.0,
+        }
+
+    monkeypatch.setattr("src.views.live_view._scan_core", fake_scan_core)
+
+    worker.start(1, {"live_trading": False})
+    assert worker.thread is not None
+    worker.thread.join(timeout=2)
+    worker.stop()
+
+    assert calls == ["acquire", "release"]

@@ -27,9 +27,11 @@ def test_build_startup_task_action_contains_expected_entrypoint():
 
 def test_build_install_and_remove_commands_use_expected_task_name():
     install_command = build_install_command("telegram")
+    resume_install_command = build_install_command("telegram", trigger="resume")
     remove_command = build_remove_command("telegram")
+    resume_remove_command = build_remove_command("telegram", trigger="resume")
 
-    assert install_command[:4] == ["schtasks", "/Create", "/F", "/SC"]
+    assert install_command[:3] == ["schtasks", "/Create", "/F"]
     assert "ONSTART" in install_command
     assert "/RU" in install_command
     assert "SYSTEM" in install_command
@@ -38,7 +40,11 @@ def test_build_install_and_remove_commands_use_expected_task_name():
     assert "/TN" in install_command
     assert task_full_name("telegram") in install_command
     assert install_command[-2:] == ["/DELAY", "0000:25"]
+    assert "ONEVENT" in resume_install_command
+    assert "System" in resume_install_command
+    assert task_full_name("telegram", "resume") in resume_install_command
     assert remove_command == ["schtasks", "/Delete", "/TN", task_full_name("telegram"), "/F"]
+    assert resume_remove_command == ["schtasks", "/Delete", "/TN", task_full_name("telegram", "resume"), "/F"]
 
 
 def test_build_startup_file_contents_contains_hidden_powershell():
@@ -52,12 +58,13 @@ def test_build_startup_file_contents_contains_hidden_powershell():
 def test_load_startup_task_status_parses_powershell_json():
     def fake_runner(args, check=False, capture_output=True, text=True, **kwargs):
         assert args[0] == "powershell.exe"
+        task_name = "ManagedWorkerResume" if "ManagedWorkerResume" in args[-1] else "ManagedWorker"
         payload = {
             "component": "worker",
             "exists": True,
-            "task_name": "ManagedWorker",
+            "task_name": task_name,
             "task_path": r"\Upbit\\",
-            "state": "Ready",
+            "state": "Ready" if task_name == "ManagedWorker" else "Queued",
             "enabled": True,
             "execute": "powershell.exe",
             "arguments": "-NoProfile -Command worker-start",
@@ -76,6 +83,8 @@ def test_load_startup_task_status_parses_powershell_json():
     assert snapshot["last_run_time"] > 0
     assert snapshot["next_run_time"] > snapshot["last_run_time"]
     assert snapshot["method"] == "scheduled-task"
+    assert snapshot["resume_exists"] is True
+    assert snapshot["resume_configured"] is True
 
 
 def test_load_startup_task_status_falls_back_to_startup_folder(tmp_path, monkeypatch):
@@ -93,6 +102,7 @@ def test_load_startup_task_status_falls_back_to_startup_folder(tmp_path, monkeyp
     assert snapshot["configured"] is True
     assert snapshot["method"] == "startup-folder"
     assert snapshot["state"] == "StartupFolder"
+    assert snapshot["resume_exists"] is False
 
 
 def test_install_startup_task_falls_back_to_startup_folder(tmp_path, monkeypatch):
@@ -106,6 +116,7 @@ def test_install_startup_task_falls_back_to_startup_folder(tmp_path, monkeypatch
     assert snapshot["ok"] is True
     assert snapshot["exists"] is True
     assert snapshot["method"] == "startup-folder"
+    assert snapshot["resume_exists"] is False
     assert startup_file_path("telegram").exists()
 
 
@@ -118,12 +129,13 @@ def test_install_startup_task_removes_startup_folder_on_scheduled_task_success(t
     def fake_runner(args, check=False, capture_output=True, text=True, **kwargs):
         if args[0] == "schtasks":
             return subprocess.CompletedProcess(args, 0, stdout="SUCCESS", stderr="")
+        task_name = "ManagedWorkerResume" if "ManagedWorkerResume" in args[-1] else "ManagedWorker"
         payload = {
             "component": "worker",
             "exists": True,
-            "task_name": "ManagedWorker",
+            "task_name": task_name,
             "task_path": r"\Upbit\\",
-            "state": "Ready",
+            "state": "Ready" if task_name == "ManagedWorker" else "Queued",
             "enabled": True,
             "execute": "powershell.exe",
             "arguments": "-NoProfile -Command worker-start",
@@ -137,6 +149,8 @@ def test_install_startup_task_removes_startup_folder_on_scheduled_task_success(t
 
     assert snapshot["ok"] is True
     assert snapshot["method"] == "scheduled-task"
+    assert snapshot["resume_exists"] is True
+    assert snapshot["resume_ok"] is True
     assert not path.exists()
 
 
@@ -155,6 +169,12 @@ def test_format_startup_status_bundle_renders_korean_summary():
                     "trigger_delay": "PT15S",
                     "last_run_time": 0.0,
                     "next_run_time": 0.0,
+                    "resume_exists": True,
+                    "resume_enabled": True,
+                    "resume_state": "Queued",
+                    "resume_configured": True,
+                    "resume_trigger_type": "MSFT_TaskEventTrigger",
+                    "resume_last_run_time": 0.0,
                 },
                 "telegram": {
                     "label": "텔레그램 제어 봇",
@@ -166,6 +186,12 @@ def test_format_startup_status_bundle_renders_korean_summary():
                     "trigger_delay": "",
                     "last_run_time": 0.0,
                     "next_run_time": 0.0,
+                    "resume_exists": False,
+                    "resume_enabled": False,
+                    "resume_state": "없음",
+                    "resume_configured": False,
+                    "resume_trigger_type": "",
+                    "resume_last_run_time": 0.0,
                 },
             },
         }
@@ -174,5 +200,6 @@ def test_format_startup_status_bundle_renders_korean_summary():
     assert "[Windows 자동 시작] 상태" in text
     assert "백그라운드 워커" in text
     assert "설치됨" in text
+    assert "복귀" in text
     assert "텔레그램 제어 봇" in text
     assert "없음" in text

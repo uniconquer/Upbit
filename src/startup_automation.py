@@ -14,18 +14,23 @@ from typing import Any, Mapping
 
 KST = timezone(timedelta(hours=9))
 STARTUP_TASK_PATH = "\\Upbit\\"
+RESUME_EVENT_QUERY = "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]"
 STARTUP_TASKS: dict[str, dict[str, str]] = {
     "worker": {
         "label": "백그라운드 워커",
         "task_name": "ManagedWorker",
+        "resume_task_name": "ManagedWorkerResume",
         "description": "사용자 로그인 시 Upbit 백그라운드 워커를 시작합니다.",
+        "resume_description": "Restart the managed worker after Windows resumes from sleep.",
         "subcommand": "worker-start",
         "delay": "0000:15",
     },
     "telegram": {
         "label": "텔레그램 제어 봇",
         "task_name": "TelegramControl",
+        "resume_task_name": "TelegramControlResume",
         "description": "사용자 로그인 시 Upbit telegram-control 봇을 시작합니다.",
+        "resume_description": "Restart the Telegram control loop after Windows resumes from sleep.",
         "subcommand": "telegram-control",
         "delay": "0000:25",
     },
@@ -58,9 +63,29 @@ def _task_spec(component: str) -> dict[str, str]:
     return STARTUP_TASKS[key]
 
 
-def task_full_name(component: str) -> str:
+def _task_variant_spec(component: str, trigger: str = "startup") -> dict[str, str]:
     spec = _task_spec(component)
-    return f"{STARTUP_TASK_PATH}{spec['task_name']}"
+    variant = str(trigger or "startup").strip().lower()
+    if variant == "startup":
+        return {
+            "trigger": "startup",
+            "task_name": spec["task_name"],
+            "description": spec["description"],
+            "delay": spec["delay"],
+        }
+    if variant == "resume":
+        return {
+            "trigger": "resume",
+            "task_name": spec["resume_task_name"],
+            "description": spec["resume_description"],
+            "delay": "",
+        }
+    raise ValueError(f"unknown task trigger: {trigger}")
+
+
+def task_full_name(component: str, trigger: str = "startup") -> str:
+    variant = _task_variant_spec(component, trigger)
+    return f"{STARTUP_TASK_PATH}{variant['task_name']}"
 
 
 def startup_file_path(component: str) -> Path:
@@ -103,37 +128,74 @@ def build_startup_file_contents(component: str, *, python_executable: str | None
 def build_install_command(
     component: str,
     *,
+    trigger: str = "startup",
     delay: str | None = None,
     python_executable: str | None = None,
 ) -> list[str]:
-    spec = _task_spec(component)
-    return [
+    variant = _task_variant_spec(component, trigger)
+    command = [
         "schtasks",
         "/Create",
         "/F",
-        "/SC",
-        "ONSTART",
         "/RU",
         "SYSTEM",
         "/RL",
         "HIGHEST",
         "/TN",
-        task_full_name(component),
+        task_full_name(component, trigger),
         "/TR",
         build_startup_task_action(component, python_executable=python_executable),
-        "/DELAY",
-        str(delay or spec["delay"]),
+    ]
+    if variant["trigger"] == "resume":
+        command.extend(
+            [
+                "/SC",
+                "ONEVENT",
+                "/EC",
+                "System",
+                "/MO",
+                RESUME_EVENT_QUERY,
+            ]
+        )
+        return command
+    command.extend(
+        [
+            "/SC",
+            "ONSTART",
+            "/DELAY",
+            str(delay or variant["delay"]),
+        ]
+    )
+    return command
+
+
+def build_install_commands(
+    component: str,
+    *,
+    delay: str | None = None,
+    python_executable: str | None = None,
+) -> list[list[str]]:
+    return [
+        build_install_command(component, trigger="startup", delay=delay, python_executable=python_executable),
+        build_install_command(component, trigger="resume", python_executable=python_executable),
     ]
 
 
-def build_remove_command(component: str) -> list[str]:
-    _task_spec(component)
-    return ["schtasks", "/Delete", "/TN", task_full_name(component), "/F"]
+def build_remove_command(component: str, trigger: str = "startup") -> list[str]:
+    _task_variant_spec(component, trigger)
+    return ["schtasks", "/Delete", "/TN", task_full_name(component, trigger), "/F"]
 
 
-def build_run_command(component: str) -> list[str]:
-    _task_spec(component)
-    return ["schtasks", "/Run", "/TN", task_full_name(component)]
+def build_remove_commands(component: str) -> list[list[str]]:
+    return [
+        build_remove_command(component, "startup"),
+        build_remove_command(component, "resume"),
+    ]
+
+
+def build_run_command(component: str, trigger: str = "startup") -> list[str]:
+    _task_variant_spec(component, trigger)
+    return ["schtasks", "/Run", "/TN", task_full_name(component, trigger)]
 
 
 def _run_subprocess(command: list[str], *, runner=subprocess.run) -> subprocess.CompletedProcess[str]:
@@ -147,9 +209,10 @@ def _run_subprocess(command: list[str], *, runner=subprocess.run) -> subprocess.
     )
 
 
-def _powershell_query_script(component: str) -> str:
+def _powershell_query_script(component: str, trigger: str = "startup") -> str:
     spec = _task_spec(component)
-    task_name = _powershell_quote(spec["task_name"])
+    variant = _task_variant_spec(component, trigger)
+    task_name = _powershell_quote(variant["task_name"])
     task_path = _powershell_quote(STARTUP_TASK_PATH)
     return (
         f"$task = Get-ScheduledTask -TaskName '{task_name}' -TaskPath '{task_path}' -ErrorAction SilentlyContinue;"
@@ -257,20 +320,49 @@ def _startup_file_status(component: str) -> dict[str, Any]:
     }
 
 
-def _normalized_status(component: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _empty_task_status(component: str, trigger: str = "startup") -> dict[str, Any]:
     spec = _task_spec(component)
+    variant = _task_variant_spec(component, trigger)
+    return {
+        "component": component,
+        "label": spec["label"],
+        "task_name": variant["task_name"],
+        "task_path": STARTUP_TASK_PATH,
+        "exists": False,
+        "enabled": False,
+        "state": "없음",
+        "description": variant["description"],
+        "execute": "",
+        "arguments": "",
+        "working_directory": "",
+        "user_id": "",
+        "logon_type": "",
+        "run_level": "",
+        "trigger_type": "",
+        "trigger_delay": "",
+        "last_run_time": 0.0,
+        "next_run_time": 0.0,
+        "last_task_result": None,
+        "configured": False,
+        "method": "",
+    }
+
+
+def _normalized_status(component: str, payload: Mapping[str, Any] | None = None, *, trigger: str = "startup") -> dict[str, Any]:
+    spec = _task_spec(component)
+    variant = _task_variant_spec(component, trigger)
     raw = dict(payload or {})
     expected_fragment = spec["subcommand"]
     arguments = str(raw.get("arguments") or "")
     return {
         "component": component,
         "label": spec["label"],
-        "task_name": str(raw.get("task_name") or spec["task_name"]),
+        "task_name": str(raw.get("task_name") or variant["task_name"]),
         "task_path": str(raw.get("task_path") or STARTUP_TASK_PATH),
         "exists": bool(raw.get("exists")),
         "enabled": bool(raw.get("enabled")),
         "state": str(raw.get("state") or ("없음" if not raw.get("exists") else "-")),
-        "description": str(raw.get("description") or spec["description"]),
+        "description": str(raw.get("description") or variant["description"]),
         "execute": str(raw.get("execute") or ""),
         "arguments": arguments,
         "working_directory": str(raw.get("working_directory") or ""),
@@ -287,11 +379,11 @@ def _normalized_status(component: str, payload: Mapping[str, Any] | None = None)
     }
 
 
-def load_startup_task_status(component: str, *, runner=subprocess.run) -> dict[str, Any]:
+def _load_task_status(component: str, *, trigger: str = "startup", runner=subprocess.run) -> dict[str, Any]:
     if not startup_supported():
-        return _normalized_status(component, {"exists": False, "state": "unsupported"})
+        return _normalized_status(component, {"exists": False, "state": "unsupported"}, trigger=trigger)
     process = runner(
-        ["powershell.exe", "-NoProfile", "-Command", _powershell_query_script(component)],
+        ["powershell.exe", "-NoProfile", "-Command", _powershell_query_script(component, trigger)],
         check=False,
         capture_output=True,
         text=True,
@@ -300,8 +392,29 @@ def load_startup_task_status(component: str, *, runner=subprocess.run) -> dict[s
     )
     payload = _parse_ps_json(process.stdout)
     if not payload:
-        return _normalized_status(component, _startup_file_status(component))
-    return _normalized_status(component, payload)
+        fallback = _startup_file_status(component) if trigger == "startup" else _empty_task_status(component, trigger)
+        return _normalized_status(component, fallback, trigger=trigger)
+    return _normalized_status(component, payload, trigger=trigger)
+
+
+def load_startup_task_status(component: str, *, runner=subprocess.run) -> dict[str, Any]:
+    startup = _load_task_status(component, trigger="startup", runner=runner)
+    resume = _load_task_status(component, trigger="resume", runner=runner)
+    startup.update(
+        {
+            "resume_exists": bool(resume.get("exists")),
+            "resume_enabled": bool(resume.get("enabled")),
+            "resume_state": str(resume.get("state") or "?놁쓬"),
+            "resume_configured": bool(resume.get("configured")),
+            "resume_trigger_type": str(resume.get("trigger_type") or ""),
+            "resume_trigger_delay": str(resume.get("trigger_delay") or ""),
+            "resume_last_run_time": float(resume.get("last_run_time") or 0.0),
+            "resume_next_run_time": float(resume.get("next_run_time") or 0.0),
+            "resume_method": str(resume.get("method") or ""),
+            "recovery_configured": bool(resume.get("configured")),
+        }
+    )
+    return startup
 
 
 def load_startup_status_bundle(*, runner=subprocess.run) -> dict[str, Any]:
@@ -312,22 +425,23 @@ def load_startup_status_bundle(*, runner=subprocess.run) -> dict[str, Any]:
 def install_startup_task(component: str, *, delay: str | None = None, runner=subprocess.run) -> dict[str, Any]:
     if not startup_supported():
         return _normalized_status(component, {"exists": False, "state": "unsupported", "ok": False})
-    process = _run_subprocess(build_install_command(component, delay=delay), runner=runner)
-    if process.returncode == 0:
+    startup_process = _run_subprocess(build_install_command(component, trigger="startup", delay=delay), runner=runner)
+    if startup_process.returncode == 0:
         path = startup_file_path(component)
         if path.exists():
             path.unlink()
-        snapshot = load_startup_task_status(component, runner=runner)
     else:
         path = startup_file_path(component)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(build_startup_file_contents(component), encoding="utf-8")
-        snapshot = _normalized_status(component, _startup_file_status(component))
+    resume_process = _run_subprocess(build_install_command(component, trigger="resume"), runner=runner)
+    snapshot = load_startup_task_status(component, runner=runner)
     snapshot.update(
         {
-            "ok": process.returncode == 0 or bool(snapshot.get("exists")),
-            "stdout": str(process.stdout or "").strip(),
-            "stderr": str(process.stderr or "").strip(),
+            "ok": bool(snapshot.get("exists")),
+            "resume_ok": resume_process.returncode == 0 and bool(snapshot.get("resume_exists")),
+            "stdout": "\n".join(filter(None, [str(startup_process.stdout or "").strip(), str(resume_process.stdout or "").strip()])),
+            "stderr": "\n".join(filter(None, [str(startup_process.stderr or "").strip(), str(resume_process.stderr or "").strip()])),
         }
     )
     return snapshot
@@ -336,7 +450,8 @@ def install_startup_task(component: str, *, delay: str | None = None, runner=sub
 def remove_startup_task(component: str, *, runner=subprocess.run) -> dict[str, Any]:
     if not startup_supported():
         return _normalized_status(component, {"exists": False, "state": "unsupported", "ok": False})
-    process = _run_subprocess(build_remove_command(component), runner=runner)
+    startup_process = _run_subprocess(build_remove_command(component, "startup"), runner=runner)
+    resume_process = _run_subprocess(build_remove_command(component, "resume"), runner=runner)
     file_path = startup_file_path(component)
     removed_file = False
     if file_path.exists():
@@ -345,9 +460,14 @@ def remove_startup_task(component: str, *, runner=subprocess.run) -> dict[str, A
     snapshot = load_startup_task_status(component, runner=runner)
     snapshot.update(
         {
-            "ok": process.returncode == 0 or removed_file or not snapshot.get("exists"),
-            "stdout": str(process.stdout or "").strip(),
-            "stderr": str(process.stderr or "").strip(),
+            "ok": (
+                startup_process.returncode == 0
+                or resume_process.returncode == 0
+                or removed_file
+                or (not snapshot.get("exists") and not snapshot.get("resume_exists"))
+            ),
+            "stdout": "\n".join(filter(None, [str(startup_process.stdout or "").strip(), str(resume_process.stdout or "").strip()])),
+            "stderr": "\n".join(filter(None, [str(startup_process.stderr or "").strip(), str(resume_process.stderr or "").strip()])),
         }
     )
     return snapshot
@@ -391,11 +511,16 @@ def format_startup_status_bundle(bundle: Mapping[str, Any]) -> str:
         installed = "설치됨" if snapshot.get("exists") else "없음"
         enabled = "ON" if snapshot.get("enabled") else "OFF"
         configured = "정상" if snapshot.get("configured") else "확인 필요"
+        recovery = "설치됨" if snapshot.get("resume_exists") else "없음"
+        recovery_enabled = "ON" if snapshot.get("resume_enabled") else "OFF"
+        recovery_configured = "정상" if snapshot.get("resume_configured") else "확인 필요"
         lines.extend(
             [
-                f"- {snapshot.get('label')}: {installed} / 활성 {enabled} / 상태 {snapshot.get('state')}",
-                f"  다음 실행: {_format_kst_timestamp(snapshot.get('next_run_time'))} / 마지막 실행: {_format_kst_timestamp(snapshot.get('last_run_time'))}",
-                f"  트리거: {snapshot.get('trigger_type') or '-'} / 지연: {snapshot.get('trigger_delay') or '-'} / 구성: {configured}",
+                f"- {snapshot.get('label')}: 시작 {installed} / 활성 {enabled} / 복귀 {recovery} / 복귀 활성 {recovery_enabled}",
+                f"  시작 상태: {snapshot.get('state')} / 복귀 상태: {snapshot.get('resume_state') or '없음'}",
+                f"  시작 마지막 실행: {_format_kst_timestamp(snapshot.get('last_run_time'))} / 복귀 마지막 실행: {_format_kst_timestamp(snapshot.get('resume_last_run_time'))}",
+                f"  시작 트리거: {snapshot.get('trigger_type') or '-'} / 복귀 트리거: {snapshot.get('resume_trigger_type') or '-'}",
+                f"  시작 구성: {configured} / 복귀 구성: {recovery_configured}",
             ]
         )
     return "\n".join(lines)

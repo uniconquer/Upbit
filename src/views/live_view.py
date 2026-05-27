@@ -28,6 +28,7 @@ from notification_text import (
     sell_filled_message,
 )
 from paper_trader import PaperTrader
+from power_keepawake import SystemAwakeGuard
 from risk_manager import ensure_daily_metrics, evaluate_entry, risk_config_from_dict, total_unrealized_pnl
 from runtime_store import load_runtime_state, save_runtime_state
 from strategy import VOLATILITY_RESET_BREAKOUT_DEFAULTS, backtest_signal_frame
@@ -1399,6 +1400,7 @@ class _Worker:
         self.order_event_tracker = OrderEventTracker()
         self.my_order_thread = None
         self.my_order_stop_event = threading.Event()
+        self.awake_guard = SystemAwakeGuard(enabled=True)
 
     def update_params(self, params: dict):
         with self.lock:
@@ -1436,62 +1438,66 @@ class _Worker:
         self.stop_event.clear()
 
         def loop():
-            while not self.stop_event.is_set():
-                try:
-                    params = self._get_params()
-                    self._ensure_my_order_stream(params)
-                    params["_metrics"] = self.metrics
-                    params["_positions"] = self.positions
-                    params["_pending_orders"] = self.pending_orders
-                    params["_trade_log"] = self.trade_log
-                    params["_daily_reports"] = self.daily_reports
-                    params["_last_daily_report_day"] = self.last_daily_report_day
-                    params["_exchange_synced"] = self.exchange_synced
-                    params["_exchange_sync_due_at"] = self.exchange_sync_due_at
-                    params["_order_event_tracker"] = self.order_event_tracker
-                    snapshot = _scan_core(params, self.last_signal_state)
-                    notifier = get_notifier()
-                    if notifier.available():
-                        for message in snapshot.get("notify", [])[:10]:
-                            try:
-                                notifier.send_text(message)
-                            except Exception:
-                                pass
-                    with self.lock:
-                        if "_metrics" in snapshot:
-                            self.metrics = dict(snapshot.get("_metrics") or {})
-                        if "_positions" in snapshot:
-                            self.positions = dict(snapshot.get("_positions") or {})
-                        if "_pending_orders" in snapshot:
-                            self.pending_orders = dict(snapshot.get("_pending_orders") or {})
-                        if "_daily_reports" in snapshot:
-                            self.daily_reports = dict(snapshot.get("_daily_reports") or {})
-                        if "_last_daily_report_day" in snapshot:
-                            saved_last_report_day = str(snapshot.get("_last_daily_report_day") or "").strip()
-                            self.last_daily_report_day = saved_last_report_day or None
-                        self.exchange_synced = bool(snapshot.get("_exchange_synced"))
-                        self.exchange_sync_due_at = float(snapshot.get("_exchange_sync_due_at") or 0.0)
-                        if "last_sig" in snapshot:
-                            self.last_signal_state = dict(snapshot.get("last_sig") or {})
-                        if snapshot.get("trades"):
-                            self.trade_log.extend(snapshot.get("trades") or [])
-                            self.trade_log = self.trade_log[-500:]
-                        self.snapshot = snapshot
-                        _persist_live_runtime(
-                            self.params,
-                            metrics=self.metrics,
-                            positions=self.positions,
-                            last_signal_state=self.last_signal_state,
-                            pending_orders=self.pending_orders,
-                            trade_log=self.trade_log,
-                            daily_reports=self.daily_reports,
-                            last_daily_report_day=self.last_daily_report_day,
-                            last_run=snapshot.get("last_run"),
-                        )
-                except Exception as exc:
-                    self.last_error = repr(exc)
-                self.stop_event.wait(self.interval)
-            self._stop_my_order_stream()
+            self.awake_guard.acquire()
+            try:
+                while not self.stop_event.is_set():
+                    try:
+                        params = self._get_params()
+                        self._ensure_my_order_stream(params)
+                        params["_metrics"] = self.metrics
+                        params["_positions"] = self.positions
+                        params["_pending_orders"] = self.pending_orders
+                        params["_trade_log"] = self.trade_log
+                        params["_daily_reports"] = self.daily_reports
+                        params["_last_daily_report_day"] = self.last_daily_report_day
+                        params["_exchange_synced"] = self.exchange_synced
+                        params["_exchange_sync_due_at"] = self.exchange_sync_due_at
+                        params["_order_event_tracker"] = self.order_event_tracker
+                        snapshot = _scan_core(params, self.last_signal_state)
+                        notifier = get_notifier()
+                        if notifier.available():
+                            for message in snapshot.get("notify", [])[:10]:
+                                try:
+                                    notifier.send_text(message)
+                                except Exception:
+                                    pass
+                        with self.lock:
+                            if "_metrics" in snapshot:
+                                self.metrics = dict(snapshot.get("_metrics") or {})
+                            if "_positions" in snapshot:
+                                self.positions = dict(snapshot.get("_positions") or {})
+                            if "_pending_orders" in snapshot:
+                                self.pending_orders = dict(snapshot.get("_pending_orders") or {})
+                            if "_daily_reports" in snapshot:
+                                self.daily_reports = dict(snapshot.get("_daily_reports") or {})
+                            if "_last_daily_report_day" in snapshot:
+                                saved_last_report_day = str(snapshot.get("_last_daily_report_day") or "").strip()
+                                self.last_daily_report_day = saved_last_report_day or None
+                            self.exchange_synced = bool(snapshot.get("_exchange_synced"))
+                            self.exchange_sync_due_at = float(snapshot.get("_exchange_sync_due_at") or 0.0)
+                            if "last_sig" in snapshot:
+                                self.last_signal_state = dict(snapshot.get("last_sig") or {})
+                            if snapshot.get("trades"):
+                                self.trade_log.extend(snapshot.get("trades") or [])
+                                self.trade_log = self.trade_log[-500:]
+                            self.snapshot = snapshot
+                            _persist_live_runtime(
+                                self.params,
+                                metrics=self.metrics,
+                                positions=self.positions,
+                                last_signal_state=self.last_signal_state,
+                                pending_orders=self.pending_orders,
+                                trade_log=self.trade_log,
+                                daily_reports=self.daily_reports,
+                                last_daily_report_day=self.last_daily_report_day,
+                                last_run=snapshot.get("last_run"),
+                            )
+                    except Exception as exc:
+                        self.last_error = repr(exc)
+                    self.stop_event.wait(self.interval)
+            finally:
+                self._stop_my_order_stream()
+                self.awake_guard.release()
 
         self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()
