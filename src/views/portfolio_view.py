@@ -9,25 +9,56 @@ import streamlit as st
 
 from src.portfolio_paper import observe_once
 from src.paper_learning import run_once as learning_once
+from src.minute_learning import observe_once as minute_once
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def render_learning():
-    folder = ROOT / '.runtime' / 'paper-learning'
     st.write('자동 개선 실험')
-    st.caption('일봉 전략 후보를 같은 시세로 관찰합니다. 30일 이상 새 성과가 쌓이면 '
+    timeframe = st.selectbox('실험 주기', ['1분봉', '일봉 · 이전 기록'], key='learning_timeframe')
+    minute = timeframe == '1분봉'
+    folder = ROOT / '.runtime' / ('minute-learning' if minute else 'paper-learning')
+    st.caption(f'{"1분봉" if minute else "일봉"} 전략 후보를 같은 시세로 관찰합니다. 30일 이상 새 성과가 쌓이면 '
                '비용·낙폭·체결 수를 평가하고 다음 세대의 설정을 생성합니다. '
                '대표 후보 선정은 이 모의 실험 안에서만 적용됩니다.')
     if st.button('학습 관찰 1회', key='learning_once'):
         try:
             with st.spinner('후보들을 같은 시세로 평가합니다…'):
-                result = learning_once(folder)
-            st.success('이미 이번 시간에 관찰했습니다.' if result['status'] == 'already_observed' else '관찰을 저장했습니다.')
+                result = minute_once(folder) if minute else learning_once(folder)
+            st.success('이미 이번 주기에 관찰했습니다.' if result['status'] == 'already_observed' else '관찰을 저장했습니다.')
         except Exception as exc:
             st.error(f'학습 관찰 실패: {exc}')
     path = folder / 'state.json'
+    worker_path = folder / 'worker.json'
+    if minute and worker_path.exists():
+        worker = json.loads(worker_path.read_text(encoding='utf-8'))
+        age = (pd.Timestamp.now(tz='UTC')-pd.Timestamp(worker['checked_at'])).total_seconds()
+        status = '관찰 지연' if age > 180 else worker.get('status')
+        st.caption(f"1분봉 관찰 프로세스: {status} · 최근 확인 {worker.get('checked_at')}")
+    minute_report = ROOT / '.runtime' / 'minute-research-v1' / 'report.json'
+    structural_report = ROOT / '.runtime' / 'strategy-research' / 'latest.json'
+    if minute and structural_report.exists():
+        result = json.loads(structural_report.read_text(encoding='utf-8'))
+        st.write('매일 전략 구조 연구')
+        st.caption('다음 연구는 이전 학습 점수를 참고해 설정을 변형하고 새 조합도 탐색합니다. '
+                   '기존 비교 기준을 포함해 하루 24개를 평가하며 투자 한도를 자동으로 늘리지 않습니다.')
+        st.caption(f"연구일 {result['run_id']} UTC · {len(result['training_ranking'])}개 조합 · "
+                   '상위 봉 추세, 비용 대비 변동 폭, 청산 확인을 비교합니다.')
+        st.write(f"선택 후보 검증 수익률 {result['test']['return_pct']:+.2f}% · "
+                 f"높은 비용 {result['stress']['return_pct']:+.2f}% · "
+                 f"완료 매도 {result['test']['closed_trades']}건 · 다음 세대 추천 {len(result['nominees'])}개")
+        st.caption('거래가 없어서 0%인 결과는 수익성 입증이 아닙니다. 과거 연구는 새 모의 관찰 실적으로 합산하지 않습니다.')
+    if minute and minute_report.exists():
+        result = json.loads(minute_report.read_text(encoding='utf-8'))
+        cols = st.columns(3)
+        cols[0].metric('1분봉 후보 평가 수익률', f"{result['candidate_test']['return_pct']:+.2f}%")
+        cols[1].metric('1분봉 완료 매도', result['candidate_test']['closed_trades'])
+        cols[2].metric('1분봉 높은 비용 수익률', f"{result['candidate_stress']['return_pct']:+.2f}%")
+        st.caption('과거 1분봉 재생 결과이며 현재 시세 관찰 실적과 별개입니다.')
+        if result['selection_favors_cash']:
+            st.info('첫 과거 실험에서는 모든 후보의 선택 점수가 불리해 현금 보유를 택했습니다.')
     if not path.exists():
         st.info('첫 관찰을 실행하면 후보별 기록이 생성됩니다.')
         return
@@ -61,6 +92,7 @@ def render_portfolio():
     st.subheader('적응형 포트폴리오 · 모의매매')
     st.caption('가상자금 10만 원으로 검증합니다. 실제 계좌나 주문과 연결되지 않습니다.')
     render_learning()
+    st.subheader('이전 일봉 포트폴리오 연구')
     folder = ROOT / '.runtime' / 'portfolio-research-v2'
     report_path = folder / 'report.json'
     state_path = ROOT / '.runtime' / 'adaptive-paper-v2' / 'state.json'

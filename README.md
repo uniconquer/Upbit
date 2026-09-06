@@ -1,5 +1,9 @@
 # Upbit Mini (경량 시세 & 패턴/Mean Reversion 뷰)
 
+> 현재 주력은 **1분봉 모의 실험**입니다. `py -3 -m src.minute_learning --watch`로
+> 완료된 1분봉을 관찰합니다. [변경 내용과 첫 실험 결과](docs/minute-learning.md).
+> 이전 일봉 실험 기록은 별도로 보존됩니다.
+
 > 자동 개선 실험: `py -3 -m src.paper_learning`은 후보 24개를 같은 시세로 모의 관찰하고,
 > 충분한 새 성과가 쌓이면 설정을 변형해 다음 세대를 만듭니다.
 > [작동 방식과 제한](docs/paper-learning.md). 실거래나 모델 자체의 강화학습은 아닙니다.
@@ -88,3 +92,9 @@ Mean Reversion:
 
 ## 라이선스
 MIT
+
+## 매일 자동 전략 연구
+
+`py -3 -m src.strategy_research_cycle`로 1분봉 기반 상위 시간대 추세·비용 필터·청산 조합을
+날짜별로 비교합니다. 검증을 통과한 후보는 다음 모의매매 세대에만 편입되며 실제 주문은 하지 않습니다.
+설정과 관찰 방법은 [1분봉 실험 문서](docs/minute-learning.md)를 참고하세요.

@@ -29,7 +29,12 @@ def initial_population():
 
 
 def config_id(config):
-    return sha256(json.dumps(asdict(config), sort_keys=True).encode()).hexdigest()[:12]
+    values = asdict(config)
+    # Preserve identifiers for cohorts created before structural research existed.
+    for key, default in {'context_minutes': 1, 'edge_cost_ratio': 0., 'exit_confirm_bars': 1, 'min_stop_fraction': 0.}.items():
+        if values[key] == default:
+            values.pop(key)
+    return sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def _candidate(config, cash):
@@ -40,8 +45,11 @@ def _candidate(config, cash):
             'drawdown_pct': 0.}
 
 
-def new_learning_state(configs=None, *, now, cash=100000.):
+def new_learning_state(configs=None, *, now, cash=100000., timeframe='day'):
+    if timeframe not in {'day', 'minute1'}:
+        raise ValueError('Unsupported timeframe')
     return {'version': 1, 'mode': 'PAPER_ONLY', 'generation': 0, 'cash_per_candidate': cash,
+            'timeframe': timeframe,
             'cohort_started_at': str(pd.Timestamp(now)), 'last_observation': None,
             'last_bucket': None, 'observations': 0, 'observed_days': [],
             'candidates': [_candidate(c, cash) for c in (configs if configs is not None else initial_population())],
@@ -78,6 +86,10 @@ def _next_population(state):
         survivors.insert(0, lookup[state['incumbent']])
     rng = random.Random(90210 + state['generation'])
     configs = {config_id(c): c for c in survivors}
+    if state.get('timeframe') == 'minute1':
+        for item in state.get('research_candidates', [])[:4]:
+            candidate = PortfolioConfig(**item['config'])
+            configs[config_id(candidate)] = candidate
     # Change parameters, never mutate source code or reuse past returns as new evidence.
     for _ in range(200):
         if len(configs) >= 24:
@@ -98,13 +110,15 @@ def advance(state, raw, prices, *, now, builder=build_features):
     if state.get('mode') != 'PAPER_ONLY' or state.get('version') != 1:
         raise ValueError('Unsupported learning state')
     stamp = pd.Timestamp(now)
-    bucket = str(stamp.floor('h'))
+    minute = state.get('timeframe') == 'minute1'
+    bucket = str(stamp.floor('min' if minute else 'h'))
     if state['last_bucket'] == bucket:
         return False
     if state['last_observation'] and stamp <= pd.Timestamp(state['last_observation']):
         raise ValueError('Old observation')
     day = str(stamp.date())
-    if state['feature_day'] != day:
+    feature_key = bucket if minute else day
+    if state['feature_day'] != feature_key:
         features = {}
         for item in state['candidates']:
             frames = builder(raw, PortfolioConfig(**item['config']))
@@ -112,12 +126,13 @@ def advance(state, raw, prices, *, now, builder=build_features):
                                        **{k: float(f.iloc[-1][k]) for k in ('atr', 'high', 'score')}}
                                    for m, f in frames.items()}
         state['features'] = features
-        state['feature_day'] = day
+        state['feature_day'] = feature_key
     for item in state['candidates']:
         for variant in ('base', 'stress'):
             sim = PortfolioSimulator.from_state(item[variant])
             count = len(sim.events)
-            sim.quote(prices, day=day, signals=state['features'][item['id']])
+            sim.quote(prices, day=day, signals=state['features'][item['id']],
+                      signal_key=bucket if minute else day)
             for event in sim.events[count:]:
                 event['ts'] = stamp.timestamp()
                 if event['side'] == 'BUY':
@@ -133,7 +148,7 @@ def advance(state, raw, prices, *, now, builder=build_features):
     state['rankings'] = sorted([_rank(c, state['cash_per_candidate']) for c in state['candidates']],
                                key=lambda r: (-r['score'], r['id']))
     elapsed = (stamp-pd.Timestamp(state['cohort_started_at'])).total_seconds()
-    state['coverage'] = min(1., state['observations']/max(1., elapsed/3600+1))
+    state['coverage'] = min(1., state['observations']/max(1., elapsed/(60 if minute else 3600)+1))
     mature = elapsed >= 30*86400 and len(state['observed_days']) >= 25 and state['coverage'] >= .8
     if not mature:
         return True
@@ -154,6 +169,9 @@ def advance(state, raw, prices, *, now, builder=build_features):
                              'coverage': state['coverage'], 'rankings': state['rankings'],
                              'candidates': state['candidates']})
     configs = _next_population(state)
+    state.setdefault('research_admissions', []).append({'generation': state['generation'] + 1,
+                                                        'candidates': state.get('research_candidates', [])})
+    state['research_candidates'] = []
     state['generation'] += 1
     state['candidates'] = [_candidate(c, state['cash_per_candidate']) for c in configs]
     state['cohort_started_at'] = str(stamp)

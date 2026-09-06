@@ -28,6 +28,10 @@ class PortfolioConfig:
     min_order: float = 5000.
     fee: float = .0005
     slippage_bps: float = 10.
+    context_minutes: int = 1
+    edge_cost_ratio: float = 0.
+    exit_confirm_bars: int = 1
+    min_stop_fraction: float = 0.
 
     def __post_init__(self):
         if self.entry_mode not in {'breakout', 'trend', 'pullback'}:
@@ -37,7 +41,7 @@ class PortfolioConfig:
                 continue
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"Invalid {name}")
-        for name in ('trend_window', 'breakout_window', 'macro_window', 'max_positions'):
+        for name in ('trend_window', 'breakout_window', 'macro_window', 'max_positions', 'context_minutes', 'exit_confirm_bars'):
             if not isinstance(getattr(self, name), int) or getattr(self, name) < 1:
                 raise ValueError(f"Invalid {name}")
         for name in ('risk_fraction', 'asset_fraction', 'exposure_fraction', 'drawdown_limit', 'daily_loss_limit'):
@@ -45,6 +49,8 @@ class PortfolioConfig:
                 raise ValueError(f"Invalid {name}")
         if self.stop_atr <= 0 or self.fee >= 1 or self.slippage_bps >= 10000:
             raise ValueError("Invalid costs or stop distance")
+        if self.min_stop_fraction >= 1 or self.context_minutes > 60 or self.exit_confirm_bars > 30:
+            raise ValueError('Invalid research feature bounds')
 
 
 def validate_frames(raw_by_market):
@@ -112,6 +118,7 @@ class PortfolioSimulator:
         self.stops = {}
         self.events = []
         self.last_signal_day = None
+        self.last_signal_key = None
         self.day = None
         self.day_start = float(initial_cash)
         self.last_equity = float(initial_cash)
@@ -145,7 +152,7 @@ class PortfolioSimulator:
         self.blocked_exits.pop(market, None)
         self.events.append(event)
 
-    def quote(self, prices, *, day, signals=None):
+    def quote(self, prices, *, day, signals=None, signal_key=None):
         day = str(pd.Timestamp(day).date())
         if self.day is not None and day < self.day:
             raise ValueError('Cannot process an older day')
@@ -163,13 +170,15 @@ class PortfolioSimulator:
             self.day_start = self.last_equity
             self.daily_halted = False
             self.day = day
-        new_signal = signals is not None and day != self.last_signal_day
+        key = signal_key if signal_key is not None else day
+        new_signal = signals is not None and key != self.last_signal_key
         if new_signal:
             for market in self.trader.positions:
                 signal = signals.get(market)
                 if signal and signal['atr'] > 0:
                     self.stops[market] = max(self.stops[market],
-                                             signal['high'] - self.config.stop_atr * signal['atr'])
+                                             signal['high'] - max(self.config.stop_atr * signal['atr'],
+                                                                  signal['high'] * self.config.min_stop_fraction))
         exited = set()
         for market in list(self.trader.positions):
             signal = (signals or {}).get(market, {})
@@ -183,6 +192,7 @@ class PortfolioSimulator:
         if not new_signal:
             return
         self.last_signal_day = day
+        self.last_signal_key = key
         if self.halted or self.daily_halted:
             return
         ranked = sorted(signals, key=lambda m: (-signals[m]['score'], m))
@@ -194,7 +204,7 @@ class PortfolioSimulator:
             if len(self.trader.positions) >= self.config.max_positions:
                 break
             price = prices[market]
-            stop = price - self.config.stop_atr * signal['atr']
+            stop = price - max(self.config.stop_atr * signal['atr'], price * self.config.min_stop_fraction)
             if stop <= 0:
                 continue
             unit = self.costs.simulate_entry(price=price, budget=1.)
@@ -220,6 +230,7 @@ class PortfolioSimulator:
                 'initial_cash': self.initial_cash, 'cash': self.cash,
                 'positions': self.trader.to_state(), 'stops': dict(self.stops), 'events': list(self.events),
                 'last_signal_day': self.last_signal_day, 'day': self.day, 'day_start': self.day_start,
+                'last_signal_key': self.last_signal_key,
                 'last_equity': self.last_equity, 'peak': self.peak, 'halted': self.halted,
                 'daily_halted': self.daily_halted, 'blocked_exits': dict(self.blocked_exits)}
 
@@ -242,6 +253,7 @@ class PortfolioSimulator:
                 raise ValueError('Invalid paper position')
         for key in ('events', 'last_signal_day', 'day', 'halted', 'daily_halted', 'blocked_exits'):
             setattr(obj, key, state[key])
+        obj.last_signal_key = state.get('last_signal_key', state.get('last_signal_day'))
         return obj
 
 
@@ -256,12 +268,17 @@ def replay(raw_by_market, config, *, start, end, initial_cash=100000., features=
         day = str(index[i].date())
         prices = {m: float(raw.open.iloc[i]) for m, raw in raw_by_market.items()}
         signals = {m: frame.iloc[i-1].to_dict() for m, frame in features.items()}
-        sim.quote(prices, day=day, signals=signals)
+        before = len(sim.events)
+        sim.quote(prices, day=day, signals=signals, signal_key=str(index[i]))
         # Today's low can stop an existing/new position, but today's high cannot
         # raise its stop until tomorrow. No optimistic intrabar path assumption.
         for market in list(sim.trader.positions):
             if float(raw_by_market[market].low.iloc[i]) <= sim.stops[market]:
                 sim._exit(market, min(prices[market], sim.stops[market]), 'intraday_stop', day)
+        for event in sim.events[before:]:
+            event['ts'] = index[i].timestamp()
+            if event['side'] == 'BUY' and sim.trader.has_position(event['market']):
+                sim.trader.get_position(event['market']).opened_at = event['ts']
         closes = {m: float(raw.close.iloc[i]) for m, raw in raw_by_market.items()}
         curve.append(sim.mark(closes))
     equity = pd.Series(curve, index=index[start:end], dtype=float)
