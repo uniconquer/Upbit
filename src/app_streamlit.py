@@ -27,6 +27,7 @@ from views.backtest_view import init_api as backtest_init
 from views.backtest_view import render_backtest
 from views.live_view import init_api as live_init
 from views.live_view import render_live
+from views.portfolio_view import render_portfolio
 
 
 st.set_page_config(page_title="Upbit Studio", layout="wide")
@@ -48,12 +49,13 @@ with st.sidebar:
     st.caption("연구하고, 모의로 검증하고, 안전장치 아래에서만 실거래로 넘어가세요.")
     view = st.radio(
         "작업 공간",
-        ["account", "backtest", "live"],
-        index=["account", "backtest", "live"].index(st.session_state.get("view", "account")),
+        ["account", "backtest", "portfolio", "live"],
+        index=["account", "backtest", "portfolio", "live"].index(st.session_state.get("view", "account")),
         key="view",
         format_func=lambda value: {
             "account": "내 자산",
             "backtest": "백테스트 랩",
+            "portfolio": "적응형 모의매매",
             "live": "라이브 데스크",
         }[value],
     )
@@ -67,5 +69,7 @@ with main_slot.container():
         render_account()
     elif view == "backtest":
         render_backtest()
+    elif view == "portfolio":
+        render_portfolio()
     else:
         render_live()
