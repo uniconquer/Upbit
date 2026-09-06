@@ -1139,6 +1139,23 @@ def build_regime_blend_guard_signals(
     return df
 
 
+def _execution_rows(df, entry_col, exit_col, execution_mode):
+    """Signals are observed at close; next_open executes them one bar later."""
+    if execution_mode not in {"same_close", "next_open"}:
+        raise ValueError("execution_mode must be same_close or next_open")
+    if execution_mode == "next_open" and "open" not in df:
+        raise ValueError("next_open requires open prices")
+    signals = df[[entry_col, exit_col]].astype("boolean").fillna(False).astype(bool)
+    if execution_mode == "next_open":
+        signals = signals.shift(1, fill_value=False)
+    prices = df["open" if execution_mode == "next_open" else "close"]
+    for ts, price, close, buy, sell in zip(
+        df.index, prices, df["close"], signals[entry_col], signals[exit_col]
+    ):
+        valid = pd.notna(price) and np.isfinite(float(price)) and float(price) > 0
+        yield ts, float(price) if valid else None, close, buy, sell
+
+
 def backtest_signal_frame(
     df: pd.DataFrame,
     *,
@@ -1146,7 +1163,13 @@ def backtest_signal_frame(
     exit_col: str = "sell_signal",
     fee: float = 0.0005,
     slippage_bps: float = 3.0,
+    execution_mode: str = "same_close",
 ) -> dict[str, object]:
+    """Equity includes open positions at estimated net liquidation value.
+
+    same_close preserves the legacy UI timing assumption. Use next_open for
+    research to avoid executing at the close that generated the signal.
+    """
     empty_result = {
         "trades": 0,
         "total_return_pct": 0.0,
@@ -1158,7 +1181,9 @@ def backtest_signal_frame(
         return empty_result
 
     in_position = False
-    entry_price = 0.0
+    qty = 0.0
+    entry_cost = 0.0
+    last_price = None
     equity_curve: list[float] = []
     equity_value = 1.0
     trades: list[float] = []
@@ -1166,26 +1191,27 @@ def backtest_signal_frame(
     max_drawdown = 0.0
     cost_model = cost_model_from_values(fee_rate=fee, slippage_bps=slippage_bps)
 
-    for _, row in df.iterrows():
-        price = row.get("close")
-        if price is None or pd.isna(price):
-            continue
-
-        if (not in_position) and bool(row.get(entry_col)):
+    for _, price, close, buy, sell in _execution_rows(df, entry_col, exit_col, execution_mode):
+        if price is not None and (not in_position) and buy:
             in_position = True
-            entry_price = cost_model.buy_price(float(price))
-
-        if in_position and bool(row.get(exit_col)):
-            exit_price = cost_model.sell_price(float(price))
-            gross = exit_price / entry_price if entry_price else 1.0
-            net = gross * (1 - fee) * (1 - fee)
-            equity_value *= net
-            trades.append((net - 1) * 100)
+            entry_cost = equity_value
+            qty = cost_model.simulate_entry(price=price, budget=entry_cost)["qty"]
+            last_price = price
+        elif price is not None and in_position and sell:
+            fill = cost_model.simulate_exit(price=price, qty=qty, cost_basis=entry_cost)
+            equity_value = fill["net_proceeds"]
+            trades.append(fill["pnl_pct"])
             in_position = False
 
-        equity_curve.append(equity_value)
-        peak = max(peak, equity_value)
-        drawdown = ((equity_value / peak) - 1) * 100 if peak else 0.0
+        if pd.notna(close) and np.isfinite(float(close)) and float(close) > 0:
+            last_price = float(close)
+        marked_equity = (
+            cost_model.simulate_exit(price=last_price, qty=qty, cost_basis=entry_cost)["net_proceeds"]
+            if in_position else equity_value
+        )
+        equity_curve.append(marked_equity)
+        peak = max(peak, marked_equity)
+        drawdown = ((marked_equity / peak) - 1) * 100 if peak else 0.0
         max_drawdown = min(max_drawdown, drawdown)
 
     if not equity_curve:
@@ -1270,20 +1296,20 @@ def extract_backtest_trade_events(
     *,
     entry_col: str = "buy_signal",
     exit_col: str = "sell_signal",
+    execution_mode: str = "same_close",
 ) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     if df.empty or "close" not in df.columns or entry_col not in df.columns or exit_col not in df.columns:
         return events
 
     in_position = False
-    for timestamp, row in df.iterrows():
-        price = row.get("close")
-        if price is None or pd.isna(price):
+    for timestamp, price, _, buy, sell in _execution_rows(df, entry_col, exit_col, execution_mode):
+        if price is None:
             continue
-        if (not in_position) and bool(row.get(entry_col)):
+        if (not in_position) and buy:
             in_position = True
             events.append({"ts": timestamp, "side": "BUY", "price": float(price)})
-        elif in_position and bool(row.get(exit_col)):
+        elif in_position and sell:
             in_position = False
             events.append({"ts": timestamp, "side": "SELL", "price": float(price)})
     return events
